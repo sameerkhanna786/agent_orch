@@ -62,6 +62,55 @@ def orchestrate(ctx):
 '''
 
 
+# Codebase-audit blueprint (dynamic-workflows Pattern B, guide §4.4): fan out a read-only
+# audit across the repo's modules, adversarially FILTER the findings to drop false positives,
+# synthesize the survivors into one brief, then SOLVE from it with escalating verified waves.
+# Unlike the guide's report-producing audit, this ends in an EXECUTION-SCORED winner (so it is
+# valid both as a standalone orchestration AND when composed via ctx.workflow("audit")).
+AUDIT_ORCHESTRATION = '''
+def orchestrate(ctx):
+    """Codebase-audit: discover -> fan-out findings -> adversarial_filter -> synthesize -> solve."""
+    ctx.phase("audit-discover")
+    modules = (ctx.repo_map.get("modules") or [])[:24]
+    targets = modules or ["the repository"]
+    finding_schema = {"type": "object", "additionalProperties": True, "required": ["finding"],
+                      "properties": {"finding": {"type": "string"}, "file": {"type": "string"}}}
+    # 1) FAN OUT one read-only finding per module (ctx.signals: no plateau accounting).
+    ctx.phase("audit-findings")
+    asks = []
+    for i, m in enumerate(targets):
+        asks.append(lambda m=m, i=i: ctx.ask(
+            "Audit the module '" + str(m) + "' for what is MISSING or incorrect to make the "
+            "visible test suite pass. Return JSON {finding, file}.",
+            schema=finding_schema, agent_id=970000 + i,
+            label="audit:" + str(m), phase="audit-findings"))
+    finds = ctx.signals(asks)
+    findings = [f.get("finding") for f in finds if isinstance(f, dict) and f.get("finding")]
+    # 2) Adversarially FILTER (drop false positives; admit only survivors).
+    ctx.phase("audit-verify")
+    kept = ctx.adversarial_filter(findings, votes=3)
+    brief = None
+    if kept:
+        brief = ("Implement the repository task. A codebase audit found these concrete gaps "
+                 "(address each):\\n- " + "\\n- ".join([str(x) for x in kept[:30]]))
+    # 3) SOLVE from the synthesized brief with escalating verified best-of-N waves.
+    ctx.phase("audit-solve")
+    cands = []
+    base = 0
+    for wave, k in enumerate(ctx.plan_waves()):
+        if not ctx.budget.can_start() or ctx.agents_used() >= ctx.max_agents:
+            break
+        thunks = [(lambda j=base + j: ctx.solve_attempt(attempt_id=j, prompt=brief,
+                  phase="audit-solve")) for j in range(k)]
+        base = base + k
+        cands = cands + [c for c in ctx.parallel(thunks) if c is not None]
+        w = ctx.select(cands)
+        if w is not None:
+            return w
+    return ctx.select(cands)
+'''
+
+
 # A second exemplar: decompose a large modular repo and pipeline per-module, then
 # a global verified select. Shows the architect the decomposition pattern.
 DECOMPOSE_EXEMPLAR = '''

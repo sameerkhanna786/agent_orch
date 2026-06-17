@@ -58,18 +58,31 @@ NO dunder access. The runtime injects everything you need via `ctx`:
   ctx.any_accepted(candidates) -> bool
   ctx.should_continue_waves() -> bool             # resume-safe wave-loop condition (stops at plateau/ceiling)
 
+  ctx.solve_attempt(..., phase=?, label=?)        # phase/label group+name this agent in the UI (per-agent opts)
+  ctx.workflow(name_or_ref, args=?)               # compose another orchestration inline (one level deep);
+                                              #   names: "default-best-of-n" | "decompose" | "audit" | "ralph"
+
 READ-ONLY SIGNALS (steer compute; they can NEVER create a Candidate or accept anything):
-  ctx.ask(prompt, schema=?, vendor=?, model=?, agent_id=?) -> dict|str|None
-                                              #   a read-only sub-question; returns structured_output
-                                              #   (if schema) or text. Pass a fixed agent_id to make it replayable.
+  ctx.ask(prompt, schema=?, vendor=?, model=?, agent_id=?, max_nudges=2, strict=False, phase=?, label=?)
+                                              #   a read-only sub-question; returns structured_output (dict OR list,
+                                              #   if schema) or text. When schema is set, an invalid reply is RE-ASKED
+                                              #   with a nudge up to max_nudges times, then -> None (or raises if
+                                              #   strict=True). Pass a fixed agent_id to make it replayable.
   ctx.signals(thunks) -> list                     # read-only ask fan-out (NOT counted as a solve wave)
+  ctx.quarantined_ask(question, untrusted_content, schema=?) -> dict|str|None
+                                              #   analyze UNTRUSTED content with an anti-injection read-only agent
 
 QUALITY PATTERNS (compose these; each DEGRADES to plain best-of-N at zero knobs and can
 only re-rank/downgrade/extend — never promote an unverified solve):
   ctx.adversarial_verify(cand, n=3, refute_if="majority") -> Candidate
                                               #   independent skeptics try to REFUTE an accepted cand;
                                               #   downgrades it if they do (guards against cheated/incomplete passes)
+  ctx.adversarial_filter(items, votes=3) -> items # ADMIT-gate plain-data findings: keep only survivors
   ctx.judge_panel(cands, lenses=[...]) -> cands   # attach a SOFT tiebreak score (sub-execution; never an accept)
+  ctx.judge_select(cands, lenses=[...]) -> Candidate|None   # judge_panel then ctx.select (the winner)
+  ctx.tournament(cands, lens=?) -> cands          # pairwise round-robin -> SOFT win-rate tiebreak (re-rank w/ select)
+  ctx.classify_and_route(items, classify=fn, routes={cat: handler}) -> [result]
+                                              #   classify each item, dispatch to its handler (e.g. cheap vs strong model)
   ctx.synthesize(cands, attempt_id=i, top_k=3) -> Candidate|None
                                               #   combine the best PARTIAL solutions into ONE new
                                               #   execution-scored attempt (the legit accept path)

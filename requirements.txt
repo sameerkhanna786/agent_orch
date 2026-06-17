@@ -23,6 +23,7 @@ swebench>=2.0
 # --- test / lint toolchain apex shells out to ---
 pytest>=8.0,<10.0
 pytest-json-report>=1.5
+pytest-xdist>=3.6          # parallel test execution (`pytest -n auto`); ~4x faster suite
 ruff>=0.5,<1.0
 mypy>=1.8,<2.0
 flake8>=6.0,<8.0

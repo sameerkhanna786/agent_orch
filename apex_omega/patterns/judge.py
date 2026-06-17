@@ -51,3 +51,15 @@ def judge_panel(ctx, candidates, *, lenses=None, base_id: int = 910000, vendor=N
         if scores:
             c.set_soft(perspective=sum(scores) / len(scores))
     return cands
+
+
+def judge_select(ctx, candidates, *, lenses=None, base_id: int = 910000, vendor=None, model=None):
+    """Judge-panel-then-SELECT (the guide's "score with parallel judges, synthesize from the
+    winner" shape): attach the soft judge score, then return the EXECUTION-AUTHORITATIVE winner
+    via ``ctx.select``. The promotion guard is ``select_best`` (kernel/select.py): it returns the
+    FIRST ACCEPTED candidate and abstains if none is accepted, so the soft judge score (which also
+    sits below every execution key in ``ranking_key``) only re-orders candidates WITHIN the accepted
+    set — it can never promote an unaccepted one. Returns the selected Candidate or None (abstain).
+    Degrades to plain ``ctx.select`` with a single lens / no candidates."""
+    scored = judge_panel(ctx, candidates, lenses=lenses, base_id=base_id, vendor=vendor, model=model)
+    return ctx.select(scored)

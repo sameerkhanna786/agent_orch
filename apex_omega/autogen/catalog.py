@@ -12,13 +12,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .templates import DECOMPOSE_EXEMPLAR, DEFAULT_ORCHESTRATION, RALPH_ORCHESTRATION
+from .templates import (
+    AUDIT_ORCHESTRATION,
+    DECOMPOSE_EXEMPLAR,
+    DEFAULT_ORCHESTRATION,
+    RALPH_ORCHESTRATION,
+)
 
 # Built-in, name-addressable workflows. Each value is a frozen ``orchestrate(ctx)`` source.
 BUILTIN_WORKFLOWS: dict[str, str] = {
     "default-best-of-n": DEFAULT_ORCHESTRATION,
     "decompose": DECOMPOSE_EXEMPLAR,
     "ralph": RALPH_ORCHESTRATION,
+    "audit": AUDIT_ORCHESTRATION,
 }
 
 

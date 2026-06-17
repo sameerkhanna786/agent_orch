@@ -13,12 +13,17 @@ Each pattern is a host-side function taking ``ctx`` first and is surfaced as a t
 """
 
 from .critic import CRITIC_SCHEMA, completeness_critic
-from .judge import JUDGE_SCHEMA, judge_panel
+from .judge import JUDGE_SCHEMA, judge_panel, judge_select
 from .loop import loop_until_dry
+from .quarantine import quarantined_ask
+from .route import CLASSIFY_SCHEMA, classify_and_route
 from .synthesize import SYNTH_SCHEMA, synthesize
+from .tournament import TOURNEY_SCHEMA, tournament
 from .verify import VERDICT_SCHEMA, adversarial_filter, adversarial_verify
 
 __all__ = [
-    "adversarial_verify", "adversarial_filter", "judge_panel", "synthesize", "loop_until_dry",
-    "completeness_critic", "VERDICT_SCHEMA", "JUDGE_SCHEMA", "SYNTH_SCHEMA", "CRITIC_SCHEMA",
+    "adversarial_verify", "adversarial_filter", "judge_panel", "judge_select", "synthesize",
+    "loop_until_dry", "completeness_critic", "tournament", "classify_and_route", "quarantined_ask",
+    "VERDICT_SCHEMA", "JUDGE_SCHEMA", "SYNTH_SCHEMA", "CRITIC_SCHEMA", "TOURNEY_SCHEMA",
+    "CLASSIFY_SCHEMA",
 ]

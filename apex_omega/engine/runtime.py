@@ -115,6 +115,8 @@ class Engine:
         extra_scoped_inputs: Optional[dict] = None,
         materialize: Optional[Callable[[str], None]] = None,
         agent_type: str = "",
+        phase: str = "",
+        label: str = "",
     ) -> ExecResult:
         """Run one journaled worker call.  On a cache HIT the recorded artifact
         (diff) is replayed/materialized and NO worker is spawned and NO budget is
@@ -202,12 +204,23 @@ class Engine:
         )
         if not hit:
             self.budget.add_usage(result.usage)
-        self._narrate({
+        # Per-agent phase/label/agentType are narration-only (NOT part of the journal key
+        # `components`), so they group/label agents in the UI (dynamic-workflows agent() opts)
+        # without ever affecting resume. A per-call `phase` overrides the global phase for
+        # THIS record only (it spreads after self._phase in _narrate).
+        rec = {
             "event": "agent", "node_id": node_id or "", "vendor": task.vendor,
             "model": task.model, "cache_hit": hit, "ok": result.ok,
             "finalization_status": result.finalization_status,
             "tokens": result.usage.total, "diff_bytes": len(result.fs_diff or ""),
-        })
+        }
+        if agent_type:
+            rec["agentType"] = agent_type
+        if label:
+            rec["label"] = label
+        if phase:
+            rec["phase"] = phase
+        self._narrate(rec)
         return result
 
     # -- parallel (barrier fan-out, null-on-fail) ------------------------

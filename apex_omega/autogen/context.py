@@ -25,6 +25,7 @@ from ..errors import CutLosses, FailLoud, PlateauStop
 from ..isolation.worktree import WorktreeProvider, apply_diff
 from ..kernel.select import Candidate, select_best
 from ..kernel.verify import VerificationResult, candidate_from_verification
+from ..schema_validate import validate_schema
 from ..types import ScopedTask
 
 
@@ -505,6 +506,31 @@ class OrchestrationContext:
         from ..patterns import judge_panel as _f
         return _f(self, candidates, **kw)
 
+    def judge_select(self, candidates, **kw):
+        """Judge-panel-then-SELECT: attach the soft judge score, then return the
+        EXECUTION-AUTHORITATIVE winner (ctx.select). Judges can only break execution-equal
+        ties — never promote an unaccepted candidate (Cardinal Contract)."""
+        from ..patterns import judge_select as _f
+        return _f(self, candidates, **kw)
+
+    def tournament(self, candidates, **kw):
+        """Pairwise round-robin judging -> SOFT win-rate tiebreak (re-rank later with ctx.select).
+        A soft signal only: cannot promote an unaccepted candidate (Cardinal Contract)."""
+        from ..patterns import tournament as _f
+        return _f(self, candidates, **kw)
+
+    def classify_and_route(self, items, *, classify, routes, **kw):
+        """Classify each item with a read-only ctx.ask, then dispatch it to routes[category]
+        (e.g. cheap model for easy items, stronger vendor for hard ones)."""
+        from ..patterns import classify_and_route as _f
+        return _f(self, items, classify=classify, routes=routes, **kw)
+
+    def quarantined_ask(self, question, untrusted_content, **kw):
+        """Analyze UNTRUSTED content with a strictly read-only, anti-injection-framed agent
+        (the quarantine pattern). A SIGNAL only — never produces a Candidate."""
+        from ..patterns import quarantined_ask as _f
+        return _f(self, question, untrusted_content, **kw)
+
     def synthesize(self, candidates, *, attempt_id, **kw):
         from ..patterns import synthesize as _f
         return _f(self, candidates, attempt_id=attempt_id, **kw)
@@ -539,7 +565,8 @@ class OrchestrationContext:
     def _attempt(self, *, aid: int, prefix: str, node_prefix: str, prompt: str,
                  strategy: str, vendor: Optional[str], model: Optional[str],
                  scoped_extra: Optional[dict] = None, meta_extra: Optional[dict] = None,
-                 checkpoint: bool = True) -> Optional[Candidate]:
+                 checkpoint: bool = True, agent_type: str = "",
+                 phase: Optional[str] = None, label: Optional[str] = None) -> Optional[Candidate]:
         """The SHARED body of every scored attempt (Backbone 2.2 extraction). Acquire a
         fresh worktree, run ONE journaled coding agent, materialize its diff, score it by
         execution, build a ranked Candidate, bank it, and (if accepted) checkpoint. This
@@ -581,6 +608,8 @@ class OrchestrationContext:
                 lambda t: session.run(t), node_id=f"{self._node_ns}{node_prefix}{aid}",
                 cli_version=getattr(session, "cli_version", ""),
                 materialize=lambda diff, _wt=wt: _materialize_cached_diff(_wt, diff),
+                agent_type=agent_type, phase=(str(phase) if phase else ""),
+                label=(str(label) if label else ""),
             )
             vr = self._scored(wt, res)
             meta = {"vendor": spec.vendor, "model": model or spec.model, "strategy": strategy,
@@ -621,33 +650,56 @@ class OrchestrationContext:
 
     def solve_attempt(self, *, strategy: Optional[str] = None, vendor: Optional[str] = None,
                       model: Optional[str] = None, prompt: Optional[str] = None,
-                      attempt_id: Optional[int] = None, checkpoint: bool = True) -> Optional[Candidate]:
+                      attempt_id: Optional[int] = None, checkpoint: bool = True,
+                      phase: Optional[str] = None, label: Optional[str] = None,
+                      agent_type: str = "") -> Optional[Candidate]:
         """Run ONE isolated coding-agent attempt and score it by execution.
         Returns a ranked Candidate (accepted iff the visible suite is green) or
         None on a hard infra failure.  Worktree lifecycle is managed by ``_attempt`` —
-        the generated code never touches the filesystem."""
+        the generated code never touches the filesystem.
+
+        ``phase`` / ``label`` group and name this agent in the narration UI (the per-agent
+        dynamic-workflows agent() opts); ``agent_type`` tags it (e.g. route a class of work)."""
         aid = self._next_attempt_id() if attempt_id is None else _as_int_id(attempt_id)
         strat = strategy or self.strategies[aid % len(self.strategies)]
         task_prompt = prompt or self._prompt_builder(self, aid, strat)
         return self._attempt(aid=aid, prefix="a", node_prefix="attempt", prompt=task_prompt,
-                             strategy=strat, vendor=vendor, model=model, checkpoint=checkpoint)
+                             strategy=strat, vendor=vendor, model=model, checkpoint=checkpoint,
+                             agent_type=agent_type, phase=phase, label=label)
 
     # ---- read-only schema'd sub-question: a SIGNAL, never a Candidate ----
     def ask(self, prompt: str, *, schema: Optional[dict] = None, vendor: Optional[str] = None,
-            model: Optional[str] = None, agent_id: Optional[int] = None):
+            model: Optional[str] = None, agent_id: Optional[int] = None,
+            max_nudges: int = 2, strict: bool = False,
+            phase: Optional[str] = None, label: Optional[str] = None, agent_type: str = "ask"):
         """Ask a coding agent a READ-ONLY sub-question over the source repo (Backbone 2.2).
 
         Generalizes the scout: runs in a fresh **forced read-only** session (no worktree,
         no diff, no score), is journaled/replayable, and returns the agent's
-        ``structured_output`` dict (when ``schema`` is given) or its final text — a SIGNAL
-        the orchestrator may use to STEER compute (which files, which approach, refute a
-        candidate). It can NEVER produce a Candidate or touch acceptance, so a pattern
-        built on it cannot promote an unverified solve. Returns None on infra failure.
+        ``structured_output`` (dict OR list, when ``schema`` is given) or its final text — a
+        SIGNAL the orchestrator may use to STEER compute (which files, which approach, refute
+        a candidate). It can NEVER produce a Candidate or touch acceptance, so a pattern built
+        on it cannot promote an unverified solve.
 
-        An explicit ``agent_id`` makes the question replayable; when omitted (review-fix)
-        the id is DERIVED from a stable hash of (prompt, schema, vendor, model) — NOT the
-        scheduling-dependent shared counter — so an unseeded ask is still replay-deterministic
-        under concurrent fan-out (identical questions collide and replay; different ones don't)."""
+        SCHEMA CONTRACT (dynamic-workflows parity, guide §2.1/§2.2): the paradigm validates a
+        schema'd reply "at the tool-call layer" and "retries on mismatch" — the canonical TERMINAL
+        outcome is to RETURN NULL (callers ``.filter(Boolean)``), NOT to throw (verified against
+        primary sources; the guide's "throws after 2 nudges" is over-precise — no source fixes a
+        retry count, and the only documented throw is the distinct "subagent never called the
+        structured-output tool" condition). So here: when ``schema`` is given the reply is
+        VALIDATED; on a miss the question is RE-ASKED with a nudge that states the exact validation
+        error, up to ``max_nudges`` times (the count is OUR choice — the paradigm fixes none) — each
+        nudge a DISTINCT journaled, replay-deterministic agent call (the nudge prompt is a pure
+        function of the prior, journaled reply). After exhausting nudges with no valid reply: returns
+        ``None`` (default — the canonical null terminal; also keeps verify/judge fan-outs fail-open
+        and degrading to plain best-of-N) or raises ``FailLoud`` when ``strict=True`` (opt-in
+        fail-loud for orchestrators that want a hard stop on an unmet schema).
+
+        ``phase`` / ``label`` group and name this agent in the narration UI (the per-agent
+        agent() opts); ``agent_type`` tags it (defaults to "ask"). An explicit ``agent_id``
+        makes the question replayable; when omitted the id is DERIVED from a stable hash of
+        (prompt, schema, vendor, model) so an unseeded ask is still replay-deterministic under
+        concurrent fan-out. Returns None on infra failure."""
         if agent_id is None:
             from ..journal.key import sha256_hex
             seed = sha256_hex("ask|" + str(prompt) + "|" + str(schema) + "|" + str(vendor) + "|" + str(model))
@@ -662,23 +714,62 @@ class OrchestrationContext:
         try:
             session = self._executor.spawn(self._source_repo, spec.vendor, model or spec.model,
                                            spec=getattr(spec, "extra", {}))
-            res = self._engine.agent(
-                ScopedTask(prompt=str(prompt), schema=schema, sandbox="read-only",
-                           model=model or spec.model, vendor=spec.vendor,
-                           timeout_seconds=self.per_agent_timeout_seconds,
-                           scoped_inputs={"ask": (f"{self._node_ns}{aid}" if self._node_ns else aid),
-                                          "repo_snapshot_sha": self._provider.base_commit}),
-                lambda t: session.run(t), node_id=f"{self._node_ns}ask{aid}",
-                cli_version=getattr(session, "cli_version", ""), agent_type="ask",
-            )
         except Exception as exc:
-            self.log(f"ask {aid}: {type(exc).__name__}: {exc}")
+            self.log(f"ask {aid}: spawn {type(exc).__name__}: {exc}")
             return None
-        if not res.ok:
-            return None
-        if schema is not None:
-            return res.structured_output if isinstance(res.structured_output, dict) else None
-        return res.final_message or ""
+
+        base_prompt = str(prompt)
+        cur_prompt = base_prompt
+        rounds = (1 + max(0, int(max_nudges))) if schema is not None else 1
+        last_err = ""
+        for k in range(rounds):
+            # nudge k>0 is its own journal node (distinct node_id + scoped "nudge" key); k==0
+            # keeps the exact prior key shape so old journals still replay as a cache HIT.
+            scoped = {"ask": (f"{self._node_ns}{aid}" if self._node_ns else aid),
+                      "repo_snapshot_sha": self._provider.base_commit}
+            node = f"{self._node_ns}ask{aid}"
+            if k > 0:
+                scoped = {**scoped, "nudge": k}
+                node = f"{self._node_ns}ask{aid}n{k}"
+            try:
+                res = self._engine.agent(
+                    ScopedTask(prompt=cur_prompt, schema=schema, sandbox="read-only",
+                               model=model or spec.model, vendor=spec.vendor,
+                               timeout_seconds=self.per_agent_timeout_seconds, scoped_inputs=scoped),
+                    lambda t: session.run(t), node_id=node,
+                    cli_version=getattr(session, "cli_version", ""), agent_type=agent_type,
+                    phase=(str(phase) if phase else ""), label=(str(label) if label else ""),
+                )
+            except Exception as exc:
+                self.log(f"ask {aid}: {type(exc).__name__}: {exc}")
+                return None
+            if not res.ok:
+                return None  # transport failure: a schema nudge cannot fix infra -> fail-open
+            if schema is None:
+                return res.final_message or ""
+            out = res.structured_output
+            # JSON permits top-level scalars/arrays, and validate_schema handles them — so
+            # validate ANY returned value; only a missing reply (None == vendor returned no
+            # parsed JSON) is the "no structured value" miss. (A schema literally requiring
+            # null at top level is pathological and ambiguous with "no reply" — out of scope.)
+            if out is None:
+                ok, err = False, "no structured JSON value was returned"
+            else:
+                ok, err = validate_schema(out, schema)
+            if ok:
+                return out
+            last_err = err
+            if k + 1 < rounds:
+                self.log(f"ask {aid}: schema miss (nudge {k + 1}/{max_nudges}): {err}")
+                import json as _json
+                cur_prompt = (
+                    base_prompt
+                    + "\n\nYOUR PREVIOUS REPLY DID NOT MATCH THE REQUIRED SCHEMA: " + err
+                    + "\nReturn ONLY a single JSON value that matches this schema EXACTLY:\n"
+                    + _json.dumps(schema, sort_keys=True)[:2000])
+        if strict:
+            raise FailLoud(f"ctx.ask({aid}): schema not satisfied after {max_nudges} nudges: {last_err}")
+        return None
 
     def make_attempt(self, i: Optional[int] = None) -> Callable[[], Optional[Candidate]]:
         """Return a thunk for a diversified attempt (strategy + vendor by index),

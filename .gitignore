@@ -13,6 +13,7 @@ __pycache__/
 
 # Virtual envs
 .venv/
+.venv_omega/
 venv/
 env/
 

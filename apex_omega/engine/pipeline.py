@@ -7,9 +7,15 @@ sum-of-slowest-per-stage to slowest-single-chain.  v1 has only barrier waves.
 
 Determinism rule (load-bearing, §02.2.3): cache entries are keyed per
 ``(item, stage)`` and the returned order is a pure function of the input item
-order + stage index — NEVER completion/wall-clock order.  A stage that raises
-drops its item to ``None`` and skips that item's remaining stages (fail-loud, the
-failure is narrated; a null is never silently treated as success).
+order + stage index — NEVER completion/wall-clock order.
+
+Null/array handling (dynamic-workflows parity, guide §2.1): a stage that *returns*
+``None`` (or any value, incl. a list) FORWARDS that exact value as the ``prevResult``
+into the next stage — the next stage callback is responsible for handling it. Only a
+stage that *raises* drops its item to ``None`` and skips that item's remaining stages
+(fail-loud, the failure is narrated; a null is never silently treated as success).
+Set ``drop_on_none=True`` for the legacy terminal-drop behavior (a returned ``None``
+ends the chain).
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ def run_pipeline(
     item_id: Optional[Callable[[Any], str]] = None,
     journal_stages: bool = True,
     budget=None,
+    drop_on_none: bool = False,
 ) -> list[Any]:
     """Stream ``items`` through ``stages`` with per-item concurrency.
 
@@ -117,8 +124,10 @@ def run_pipeline(
                 prev = None
                 break
             prev = out
-            if prev is None:
-                # a stage may signal terminal-drop by returning None
+            # guide §2.1: a RETURNED value (incl. None or a list) is FORWARDED as the next
+            # stage's prevResult — only a RAISED stage drops the item. Opt back into the legacy
+            # terminal-drop (a returned None ends the chain) with drop_on_none=True.
+            if drop_on_none and prev is None:
                 break
         with lock:
             results[i] = prev

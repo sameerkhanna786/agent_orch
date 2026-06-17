@@ -153,7 +153,9 @@ class ScopedTask:
 @dataclass
 class ExecResult:
     final_message: str = ""
-    structured_output: Optional[dict] = None   # validated; None if schema unmet
+    structured_output: Optional[dict] = None   # RAW vendor-parsed JSON (dict|list); schema
+    #                                            validation + nudge happen one layer up in ctx.ask,
+    #                                            not here (this layer is a thin pass-through)
     usage: TokenUsage = field(default_factory=TokenUsage)
     session_id: Optional[str] = None           # vendor session handle, for resume
     raw_events: list[dict] = field(default_factory=list)  # telemetry, NOT the contract
