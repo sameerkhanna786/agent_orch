@@ -154,13 +154,14 @@ class OrchestrationContext:
         # secondary tier), NEVER the last wave — so a refactor dip that recovers is not a
         # cut, and a high-but-flat pass_rate (no new gold) still counts as dry. Plus two
         # hard-cut streaks (all-nonresult waves; sterile/identical-diff waves).
-        self._dry_rounds = 0
+        self._dry_rounds = 0                  # telemetry: consecutive dry WAVES (not the cut unit)
         self._best_pass_rate = 0.0
         self._best_gold_passed = 0
         self._nonresult_streak = 0
         self._sterile_streak = 0
         self._seen_shas: set = set()
         self._tokens_at_best = 0
+        self._agents_at_best = 0              # agents_used when the BEST last improved (cut unit)
         self._halt_reason = ""
         self._halt_is_cut = False
         self._halted = False
@@ -329,6 +330,7 @@ class OrchestrationContext:
             self._best_pass_rate = round_pass
             self._dry_rounds = 0
             self._tokens_at_best = self._engine.budget.spent()
+            self._agents_at_best = self._engine.agents_used()
         else:
             self._dry_rounds += 1
         # HARD-CUT STREAKS counted in ATTEMPTS, not waves (review M1: SIZE-INVARIANT — a width-1
@@ -352,10 +354,13 @@ class OrchestrationContext:
         return out
 
     def _wave_state(self) -> dict:
-        """The cut-losses detector inputs at the current wave boundary."""
+        """The cut-losses detector inputs at the current wave boundary. All cut signals are in
+        ATTEMPTS (agents), so the rule is invariant to the wave schedule and the arm width."""
+        agents = self._engine.agents_used()
         return {
-            "dry_rounds": self._dry_rounds,
-            "agents_used": self._engine.agents_used(),
+            "attempts_since_improvement": max(0, agents - self._agents_at_best),
+            "dry_rounds": self._dry_rounds,          # telemetry only (not a cut signal)
+            "agents_used": agents,
             "nonresult_streak": self._nonresult_streak,
             "sterile_streak": self._sterile_streak,
             "tokens_since_improvement": max(0, self._engine.budget.spent() - self._tokens_at_best),

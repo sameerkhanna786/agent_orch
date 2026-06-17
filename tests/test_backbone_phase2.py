@@ -62,24 +62,27 @@ def _ctx_with(responder):
 
 # --- 2.1/2.4 cut-losses terminates a no-clock fan-out -------------------------- #
 def test_governor_plateau_raises_after_dry_rounds():
-    # The soft plateau is budget-aware patience = base + ceil(log2(agents+1)). Pin base=2 and use
-    # distinct content_shas so this isolates the no-progress cut (not the sterile hard cut) at 0
-    # agents -> patience 2 -> halt after the 2nd dry round.
+    # The soft plateau cuts on ATTEMPTS-since-improvement (schedule/arm-invariant — a wave-based
+    # rule would never fire under omega's doubling schedule). Pin a small attempt-patience and
+    # simulate agent growth; distinct shas so this isolates the no-progress cut, not the sterile one.
     ctx = _ctx()
-    ctx.governor.base_patience = 2
-    for i in range(2):
-        ctx.parallel([lambda i=i: _cand(0.0, sha=f"s{i}")])   # 2 dry rounds -> halt set
-    assert ctx._halted is True
+    ctx.governor.plateau_patience = 3
+    agents = {"n": 0}
+    ctx._engine.agents_used = lambda: agents["n"]
+    for i in range(3):
+        agents["n"] += 1
+        ctx.parallel([lambda i=i: _cand(0.0, sha=f"s{i}")])   # 3 dry attempts -> halt set
+    assert ctx._halted is True and ctx._halt_reason == "cut:no-progress"
     with pytest.raises(PlateauStop):                          # CutLosses subclass -> caught
+        agents["n"] += 1
         ctx.parallel([lambda: _cand(0.0, sha="sX")])          # a `while True` here terminates
 
 
 def test_sterile_diff_streak_is_a_hard_cut():
     # repeating the SAME (or empty) diff with no improvement is an objectively-stuck state: the
-    # sterile-diff hard cut fires once enough sterile ATTEMPTS accumulate. base_patience is raised
-    # to isolate the hard cut from the soft plateau; sterile_streak_cut is pinned small for speed.
+    # sterile-diff hard cut fires once enough sterile ATTEMPTS accumulate (no agent growth needed,
+    # so the soft plateau — which needs attempts — never interferes here). Pin the cut small.
     ctx = _ctx()
-    ctx.governor.base_patience = 99
     ctx.governor.sterile_streak_cut = 3
     for _ in range(8):
         if ctx._halted:
@@ -92,14 +95,16 @@ def test_hard_cuts_are_attempt_based_not_wave_based():
     # review M1: a width-1 lineage and a width-N wave with the SAME per-attempt sterility must be
     # cut after a comparable number of ATTEMPTS, not waves. With sterile_streak_cut=6 (attempts):
     # a single width-6 all-sterile wave trips it, AND ~6 width-1 sterile waves trip it.
-    wide = _ctx(); wide.governor.base_patience = 99; wide.governor.sterile_streak_cut = 6
+    wide = _ctx(); wide.governor.sterile_streak_cut = 6
     wide._seen_shas.add("dup")                                 # pre-seed so the whole wave is sterile
     wide.parallel([(lambda: _cand(0.0, sha="dup")) for _ in range(6)])   # one width-6 sterile wave
     assert wide._halted is True and wide._halt_reason == "cut:sterile-diff-streak"
 
-    narrow = _ctx(); narrow.governor.base_patience = 99; narrow.governor.sterile_streak_cut = 6
+    narrow = _ctx(); narrow.governor.sterile_streak_cut = 6
     narrow._seen_shas.add("dup")
     for _ in range(6):
+        if narrow._halted:
+            break
         narrow.parallel([lambda: _cand(0.0, sha="dup")])      # width-1, 6 sterile attempts
     assert narrow._halted is True and narrow._halt_reason == "cut:sterile-diff-streak"
 
@@ -113,19 +118,18 @@ def test_governor_does_not_halt_while_improving():
 
 def test_detector_does_not_cut_slow_winner_under_growing_waves():
     # THE critical false-cut regression guard (the jinja base-s0 counterexample: pass_rate=0 for
-    # ~6 consecutive waves, then SOLVED at wave 6). Under omega's GROWING waves the budget-aware
-    # patience (base 3 + ceil(log2(agents+1))) must stay ahead of dry_rounds so the slow-but-real
-    # winner is NEVER cut before it solves. Distinct diffs each wave (so the sterile cut is not the
-    # subject), agents_used simulated to grow with the wave schedule.
+    # ~6 doubling waves = ~63 agents, then SOLVED at wave 6). The default attempt-patience (64)
+    # must exceed those ~63 dry attempts so the slow-but-real winner is NEVER cut before it solves.
+    # Distinct diffs each wave (so the sterile cut is not the subject).
     ctx = _ctx()
     agents = {"n": 0}
     ctx._engine.agents_used = lambda: agents["n"]          # simulate budget growth per wave
-    for w, sz in enumerate([1, 2, 4, 8, 16, 32]):          # 6 dry waves (pass_rate 0)
+    for w, sz in enumerate([1, 2, 4, 8, 16, 32]):          # 6 dry waves -> 63 dry agents
         agents["n"] += sz
         ctx.parallel([lambda w=w: _cand(0.0, sha=f"w{w}")])
-        assert ctx._halted is False, f"false-cut at dry wave {w} (dry={ctx._dry_rounds})"
-    agents["n"] += 64
-    ctx.parallel([lambda: _cand(1.0, sha="solve")])        # wave 6 finally solves
+        assert ctx._halted is False, f"false-cut at dry wave {w} (since_improve={agents['n']})"
+    agents["n"] += 1
+    ctx.parallel([lambda: _cand(1.0, sha="solve")])        # the next wave finally solves
     assert ctx._halted is False and abs(ctx.best_pass_rate - 1.0) < 1e-9
 
 
@@ -147,8 +151,10 @@ def test_detector_does_not_cut_slow_winner_on_a_sequential_width_1_arm():
 
 def test_detector_cuts_a_genuinely_stuck_run_within_bounded_waves():
     # a doomed repo (pass_rate 0 forever, distinct diffs so not the sterile cut) IS cut by the
-    # budget-aware no-progress plateau within a bounded number of waves — not run to the ceiling.
+    # attempt-based no-progress plateau once attempts-since-improvement reaches the patience floor
+    # — not run to the ceiling. Pin patience small for a fast, deterministic check.
     ctx = _ctx()
+    ctx.governor.plateau_patience = 24
     agents = {"n": 0}
     ctx._engine.agents_used = lambda: agents["n"]
     cut_wave = None
@@ -160,8 +166,8 @@ def test_detector_cuts_a_genuinely_stuck_run_within_bounded_waves():
         ctx.parallel([lambda w=w: _cand(0.0, sha=f"d{w}")])
     assert ctx._halted is True
     assert ctx._halt_reason == "cut:no-progress"
-    # at 4 agents/wave, patience ~= 4 + ceil(log2(4w+1)); it cuts well before 60 waves.
-    assert (cut_wave or 60) <= 16
+    # 4 agents/wave, patience 24 -> cut once since-improvement >= 24, i.e. by ~wave 6.
+    assert (cut_wave or 60) <= 8
 
 
 def test_wave_decisions_replay_deterministically_on_resume():
@@ -175,23 +181,25 @@ def test_wave_decisions_replay_deterministically_on_resume():
             base_commit=None, score_fn=lambda wt: None, prompt_builder=lambda c, i, s: "x",
         )
 
-    # run 1 (pin patience=2 at 0 agents): halts after the 2nd dry round. Distinct shas so the
-    # sterile hard cut is not the subject.
+    # run 1 (pin sterile cut=2): identical diffs -> sterile hard cut. wave0 sees the sha fresh
+    # (sterile 0), wave1 repeats it (sterile 1), wave2 (sterile 2) -> halt (recorded {continue:False}).
     ctx1 = _mk()
-    ctx1.governor.base_patience = 2
-    ctx1.parallel([lambda: _cand(0.0, sha="a")])   # wave0 -> dry=1 continue
+    ctx1.governor.sterile_streak_cut = 2
+    ctx1.parallel([lambda: _cand(0.0, sha="dup")])   # wave0 -> fresh sha, continue
+    ctx1.parallel([lambda: _cand(0.0, sha="dup")])   # wave1 -> sterile 1, continue
     assert ctx1._halted is False
-    ctx1.parallel([lambda: _cand(0.0, sha="b")])   # wave1 -> dry=2 -> halt (recorded {continue:False})
+    ctx1.parallel([lambda: _cand(0.0, sha="dup")])   # wave2 -> sterile 2 -> halt
     assert ctx1._halted is True
 
     # run 2 attaches to the SAME run-dir/journal but with a governor that LIVE would never
-    # halt (patience + streak knobs huge). The journaled verdicts must win -> identical halt seq.
+    # halt (cut knobs huge). The journaled verdicts must win -> identical halt sequence.
     ctx2 = _mk()
-    ctx2.governor.base_patience = 999              # live would say "continue" forever
-    ctx2.governor.sterile_streak_cut = 999
-    ctx2.parallel([lambda: _cand(0.0, sha="a")])   # replays wave0=continue (HIT)
+    ctx2.governor.sterile_streak_cut = 999            # live would say "continue" forever
+    ctx2.governor.plateau_patience = 999
+    ctx2.parallel([lambda: _cand(0.0, sha="dup")])   # replays wave0=continue (HIT)
+    ctx2.parallel([lambda: _cand(0.0, sha="dup")])   # replays wave1=continue (HIT)
     assert ctx2._halted is False
-    ctx2.parallel([lambda: _cand(0.0, sha="b")])   # replays wave1=halt (HIT) despite knobs
+    ctx2.parallel([lambda: _cand(0.0, sha="dup")])   # replays wave2=halt (HIT) despite knobs
     assert ctx2._halted is True
 
 
