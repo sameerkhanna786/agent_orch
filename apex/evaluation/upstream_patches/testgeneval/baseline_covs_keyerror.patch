@@ -1,0 +1,63 @@
+# APEX-maintained patch against kjain14/testgeneval. The PR plan that
+# tracks the upstream-merge work for this divergence lives in
+# UPSTREAM_PR_PLAN.md alongside this file. See PR 3 ("defensive
+# baseline_covs handling in swebench_utils.get_eval_report").
+#
+# Why this patch exists
+# ---------------------
+# The published kjain14/testgenevallite dataset has rows where the
+# "baseline_covs" column is absent (these are the "lite" subset rows
+# where the publisher did not run the baseline-coverage sweep). The
+# upstream get_eval_report() does a bare ``swe_bench_instances[...]
+# ["baseline_covs"]`` lookup, which raises KeyError mid-aggregation
+# and aborts the whole generate_report.py invocation -- meaning a
+# single ill-formed row renders the entire pass@1 / mutation /
+# coverage report unreadable.
+#
+# The defensive fix:
+#   * Replace the bare key lookup with ``.get("baseline_covs", {})``
+#     at every call site.
+#   * When baseline_cov_info is empty, skip the
+#     ``add_execution_metric(..., "coverage")`` call so we don't try
+#     to compute a coverage_imp_baseline against an absent baseline.
+#   * Record a ``coverage_imp_baseline_missing = True`` diagnostic so
+#     the per-instance row carries the divergence information forward.
+diff --git a/swebench_docker/swebench_utils.py b/swebench_docker/swebench_utils.py
+index 1111111..2222222 100644
+--- a/swebench_docker/swebench_utils.py
++++ b/swebench_docker/swebench_utils.py
+@@ -196,9 +196,9 @@
+             instance_id = eval_log.split("/")[-1].split(".")[0]
+
+             if raw_only:
+-                eval_sm["baseline_covs"] = swe_bench_instances[instance_id][
+-                    "baseline_covs"
+-                ]
++                eval_sm["baseline_covs"] = swe_bench_instances.get(
++                    instance_id, {}
++                ).get("baseline_covs", {})
+
+             report = (
+                 get_eval_report(eval_sm, swe_bench_instances, instance_id, is_baseline)
+@@ -316,11 +316,17 @@ def get_eval_report(
+         )
+
+         if not is_baseline:
+-            baseline_cov_info = swe_bench_instances[instance_id]["baseline_covs"]
+-
+-            add_execution_metric(
+-                eval_sm, final_results, setting, baseline_cov_info, "coverage"
++            baseline_cov_info = swe_bench_instances.get(instance_id, {}).get(
++                "baseline_covs", {}
+             )
++            if baseline_cov_info:
++                add_execution_metric(
++                    eval_sm, final_results, setting, baseline_cov_info, "coverage"
++                )
++            else:
++                # Defensive: kjain14/testgenevallite "lite" rows omit
++                # baseline_covs. Record the divergence and continue.
++                final_results[f"{setting}_coverage_imp_baseline_missing"] = True
+             if setting == "full":
+                 add_execution_metric(
+                     eval_sm, final_results, setting, {}, "mutation_score"

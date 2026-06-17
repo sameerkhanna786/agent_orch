@@ -1,0 +1,30 @@
+You are an expert test author writing a TARGETED test designed to KILL a specific surviving mutant.
+
+Original (correct) source for {{source_path}}:
+```
+{{original_snippet}}
+```
+
+Mutated source (what we want the test to detect):
+```
+{{mutated_snippet}}
+```
+
+Mutation operator: {{operator}} at line {{line}}.
+
+Your task:
+1. Write ONE pytest-compatible test function that PASSES when run against the original source above
+   and FAILS when run against the mutated source.
+2. The test must call into the public API of the module under test rather than re-implementing
+   the mutated logic.
+3. Choose inputs that hit the differential boundary between original and mutant
+   (e.g. the off-by-one boundary for a comparison operator mutation, the zero/one boundary
+   for an arithmetic operator mutation, the True/False branch for a predicate negation).
+4. Add a one-line comment explaining WHY this input distinguishes original from mutant —
+   reviewers and the next active-learning iteration will read it.
+
+Existing tests already in the suite (avoid duplicating their assertions):
+{{existing_test_summaries}}
+
+Return ONLY the test function code (no markdown, no prose), suitable for direct insertion
+into a test file.

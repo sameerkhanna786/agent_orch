@@ -1,0 +1,20 @@
+{
+  "_comment_": "Pinned sha256 digests for docker images used by APEX benchmark runs. Resolution order is registry -> docker inspect -> bare tag. Add tags here to make published headline numbers reproducible. Format: <full-tag-string>: <sha256:...>. Use the literal string 'unpinned' (or the empty string) to record 'tag known to APEX, digest not yet pinned' so docker_pinning logs a clearer warning. Per BENCHMARK_FAIRNESS_CHECKLIST.md, every published headline number MUST resolve through this registry.",
+  "_owners_": {
+    "commit0": "phase1a-commit0 (python:VER-bookworm runtime containers used by Commit0BenchmarkRunner)",
+    "swtbench": "phase1a-swtbench (aorwall/sweb.eval.x86_64.* per-instance images)",
+    "testgeneval": "phase1a-testgeneval (TestGenEval container images)"
+  },
+  "_swtbench_namespace_": "aorwall",
+  "_swtbench_image_pattern_": "aorwall/sweb.eval.x86_64.<instance_id_lower>:latest",
+  "_swtbench_dataset_": "nmuendler/SWT-Bench_Lite_bm25_27k_zsb",
+  "_swtbench_pinning_status_": "Phase 1c scaffold; per-instance digests will be populated by the first end-to-end SWT-Bench run that observes a clean pull. Until then SWT-Bench images run unpinned with a docker_pinning warning.",
+  "_commit0_pinning_status_": "TODO: resolve real digests via 'docker inspect python:3.10-bookworm' / 'docker inspect python:3.12-bookworm' on the build host and replace 'unpinned' with 'sha256:...'. Until then commit0 runtime containers run unpinned with a docker_pinning stderr warning. The 3.11 entry exists for repos that may opt in via overrides.",
+  "_testgeneval_namespace_": "kdjain",
+  "_testgeneval_image_pattern_": "kdjain/swe-bench-<repo_name>-{instance|testbed}:<instance_id_or_version>",
+  "_testgeneval_dataset_": "kjain14/testgenevallite",
+  "_testgeneval_pinning_status_": "Phase 1b scaffold; per-instance/per-version testbed digests will be populated by the first end-to-end TestGenEval run that observes a clean pull. Until then TestGenEval images run unpinned with a docker_pinning warning. Tags follow the kdjain/swe-bench-<repo>-instance:<instance_id> and kdjain/swe-bench-<repo>-testbed:<version> conventions emitted by apex/evaluation/docker_subprocess_runner._docker_image_for.",
+  "python:3.10-bookworm": "sha256:acf2bee647ad337c3665458b56756da32c230077fc8d02a059638f5da27737c9",
+  "python:3.11-bookworm": "sha256:99f4240b31e5b9cf1e792420390b0d531022af3922b3d15681e7b818ca63fe37",
+  "python:3.12-bookworm": "sha256:868caacbb670a798da4741cb4944aee2d90adb753b15b17bff98242d76bb9144"
+}

@@ -1,0 +1,25 @@
+# Eval artifacts (large, regenerable) — never committed
+runs/
+runs_*/
+*.log
+
+# Python caches / build
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Worktrees / scratch created during eval
+worktrees/
+*.tmp
+
+# OS / editor
+.DS_Store
+*.swp

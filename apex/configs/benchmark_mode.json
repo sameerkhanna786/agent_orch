@@ -1,0 +1,17 @@
+{
+  "_comment": "Headline-race preset (Phase A.3). Strategic flips relaxed for raw scoring. Use for leaderboard runs: APEX-private scoring only, no fairness audit overhead, runnable-denominator headline (env-skips excluded), salvaged candidates surface as success, looser abstention, controller-models library disabled.",
+  "benchmark": {
+    "commit0_official_audit_selected": false,
+    "fairness_audit_mode": "off",
+    "report_headline_metric": "score_runnable"
+  },
+  "rollout": {
+    "allow_salvage": true
+  },
+  "orchestration": {
+    "abstention_threshold": 0.30
+  },
+  "controller_models": {
+    "library_enabled": false
+  }
+}

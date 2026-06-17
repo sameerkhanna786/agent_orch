@@ -1,0 +1,21 @@
+{
+  "_metadata": {
+    "benchmark_relabel": {
+      "apex_smoke30_20260514_171153": "commit0",
+      "rationale": "harness_name=commit0_shared_harness; smoke-30 sweep used commit0_combined dataset"
+    },
+    "calibration_run": "apex_calibration_20260514_200722",
+    "f1_per_benchmark": {
+      "commit0": 1.0
+    },
+    "n_tasks_per_benchmark": {
+      "commit0": 5
+    },
+    "policy_version": "calibrated-v1",
+    "prior_threshold": 0.5,
+    "source_smoke_dir": "/tmp/apex_smoke30_20260514_171153",
+    "synthetic": false,
+    "threshold_step": 0.05
+  },
+  "commit0": 0.4
+}

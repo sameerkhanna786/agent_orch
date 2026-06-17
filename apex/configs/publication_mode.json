@@ -1,0 +1,18 @@
+{
+  "_comment": "Defensible-numbers preset (Phase A.3). All four strategic flips ON. Use for academic publication: official upstream audit, parallel fairness scoring, strict (env-skips count) headline, no rollout salvage, calibrated abstention threshold, controller-models library enabled.",
+  "benchmark": {
+    "commit0_official_audit_selected": true,
+    "fairness_audit_mode": "parallel",
+    "report_headline_metric": "score_strict",
+    "testgeneval_apply_upstream_patches": false
+  },
+  "rollout": {
+    "allow_salvage": false
+  },
+  "orchestration": {
+    "abstention_threshold": 0.50
+  },
+  "controller_models": {
+    "library_enabled": true
+  }
+}

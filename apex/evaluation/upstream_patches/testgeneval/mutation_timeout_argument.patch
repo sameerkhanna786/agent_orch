@@ -1,0 +1,141 @@
+# APEX-maintained patch against kjain14/testgeneval. The PR plan that
+# tracks the upstream-merge work for this divergence lives in
+# UPSTREAM_PR_PLAN.md alongside this file. See PR 1 ("--mutation_timeout"
+# flag plumbing) and PR 2 ("macOS bind-mount fix"). The historical
+# "--memory_swappiness 5" -> "--memory-swappiness 5" hunk has been
+# removed from this patch as of Phase 1.3 because fixing the upstream
+# typo silently changes container behaviour vs. the published baseline.
+diff --git a/run_evaluation.py b/run_evaluation.py
+index 15c5026..d93e1e2 100755
+--- a/run_evaluation.py
++++ b/run_evaluation.py
+@@ -61,6 +61,7 @@ async def main(
+     timeout: int = 900,
+     num_processes: int = -1,
+     skip_mutation: bool = False,
++    mutation_timeout: int = 3600,
+ ):
+     """
+     Runs evaluation on predictions for each model/repo/version combination.
+@@ -171,12 +172,18 @@ async def main(
+                         **kwargs,
+                         only_baseline=False,
+                         skip_mutation=skip_mutation,
++                        mutation_timeout=mutation_timeout,
+                     )
+
+             for setting in task_instance[KEY_PREDICTIONS]:
+                 task = asyncio.create_task(
+                     run_docker_throttled(
+-                        task_instance, namespace, log_dir, setting, timeout
++                        task_instance,
++                        namespace,
++                        log_dir,
++                        setting,
++                        0,
++                        timeout=timeout,
+                     )
+                 )
+                 tasks.append(task)
+@@ -225,5 +232,11 @@ if __name__ == "__main__":
+     parser.add_argument(
+         "--skip_mutation", action="store_true", help="(Optional) Skip mutation"
+     )
++    parser.add_argument(
++        "--mutation_timeout",
++        type=int,
++        help="(Optional) Mutation phase timeout in seconds (default: 3600)",
++        default=3600,
++    )
+     args = parser.parse_args()
+     asyncio.run(main(**vars(args)))
+diff --git a/swebench_docker/evaluate_instance.py b/swebench_docker/evaluate_instance.py
+index ea357df..2ed1a67 100644
+--- a/swebench_docker/evaluate_instance.py
++++ b/swebench_docker/evaluate_instance.py
+@@ -344,6 +344,7 @@ def main(
+     image_type: str = "conda",
+     only_baseline: bool = False,
+     skip_mutation: bool = False,
++    mutation_timeout: int = 3600,
+ ):
+     logger.info(
+         "Instance ID: "
+@@ -374,7 +375,7 @@ def main(
+         repo_dir,
+         log_dir,
+         timeout=timeout,
+-        mutation_timeout=3600,
++        mutation_timeout=mutation_timeout,
+         image_type=image_type,
+     ) as tcm:
+         test_patch = task_instance["test_patch"]
+@@ -437,6 +438,14 @@ if __name__ == "__main__":
+     if setting is None:
+         raise ValueError("SETTING environment variable is not set")
+
++    mutation_timeout_env = os.getenv("MUTATION_TIMEOUT")
++    int_mutation_timeout = 3600
++    if mutation_timeout_env is not None:
++        try:
++            int_mutation_timeout = int(mutation_timeout_env)
++        except ValueError:
++            raise ValueError("MUTATION_TIMEOUT environment variable must be an integer")
++
+     main(
+         task_instance=task_instance,
+         testbed_name=testbed_name,
+@@ -447,4 +456,5 @@ if __name__ == "__main__":
+         image_type=os.getenv("IMAGE_TYPE", "conda"),
+         only_baseline=os.getenv("ONLY_BASELINE") == "True",
+         skip_mutation=os.getenv("SKIP_MUTATION") == "True",
++        mutation_timeout=int_mutation_timeout,
+     )
+diff --git a/swebench_docker/run_docker.py b/swebench_docker/run_docker.py
+index 635c706..b44685c 100644
+--- a/swebench_docker/run_docker.py
++++ b/swebench_docker/run_docker.py
+@@ -30,6 +30,7 @@ async def run_docker_evaluation(
+     base64_instance: bool = True,
+     only_baseline: bool = False,
+     skip_mutation: bool = False,
++    mutation_timeout: int = 3600,
+ ):
+     repo_name = task_instance["repo"].replace("/", "_")
+
+@@ -55,9 +56,15 @@ async def run_docker_evaluation(
+
+     if swebench_docker_fork_dir:
+         # Create a temporary file to store the task_instance JSON
+-        tmpfile_path = tempfile.mktemp(suffix=".json")
+-        with open(tmpfile_path, "w+") as f:
++        # Use log_dir for the tempfile so Docker Desktop on macOS can
++        # bind-mount it (system /var/folders tempdirs are not shared by
++        # default and bind-mounts there land as directories, breaking the
++        # container's task_instance.json read).
++        with tempfile.NamedTemporaryFile(
++            mode="w+", suffix=".json", dir=log_dir, delete=False
++        ) as f:
+             json.dump(task_instance, f)
++            tmpfile_path = f.name
+
+         docker_command = [
+             "docker",
+@@ -92,6 +99,8 @@ async def run_docker_evaluation(
+             f"ONLY_BASELINE={only_baseline}",
+             "-e",
+             f"SKIP_MUTATION={skip_mutation}",
++            "-e",
++            f"MUTATION_TIMEOUT={mutation_timeout}",
+             docker_image,
+         ]
+     else:
+@@ -122,6 +131,8 @@ async def run_docker_evaluation(
+             f"ONLY_BASELINE={only_baseline}",
+             "-e",
+             f"SKIP_MUTATION={skip_mutation}",
++            "-e",
++            f"MUTATION_TIMEOUT={mutation_timeout}",
+             docker_image,
+         ]
+

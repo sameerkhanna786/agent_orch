@@ -1,0 +1,156 @@
+{
+  "_comment": "Max-quality Apex preset for comparisons against the strongest standalone agentic CLI. Assumes budget is not the constraint: run a broad Apex ensemble, include a pure Codex GPT-5.5 standalone anchor, and preserve that anchor unless another candidate has strictly stronger verifier evidence.",
+  "llm_configs": [
+    {
+      "backend": "codex_cli",
+      "model": "gpt-5.5",
+      "cli_timeout": 7200,
+      "cli_hard_timeout_seconds": 21600,
+      "cli_disable_osx_sandbox": true,
+      "cli_permission_mode": "never"
+    },
+    {
+      "backend": "claude_cli",
+      "model": "opus",
+      "cli_model_id": "claude-opus-4-8[1m]",
+      "cli_timeout": 7200,
+      "cli_hard_timeout_seconds": 21600,
+      "cli_disable_osx_sandbox": true
+    },
+    {
+      "backend": "gemini_cli",
+      "model": "gemini-3.1-pro",
+      "cli_timeout": 7200,
+      "cli_hard_timeout_seconds": 21600,
+      "cli_disable_osx_sandbox": true
+    }
+  ],
+  "rollout": {
+    "agent_mode": "scaffolded",
+    "num_rollouts": 32,
+    "min_rollouts": 8,
+    "max_rollouts": 64,
+    "rollout_buckets": [8, 16, 32, 64],
+    "enable_adaptive_allocation": true,
+    "parallel_workers": 8,
+    "enable_standalone_anchor": true,
+    "standalone_anchor_profile_index": 0,
+    "standalone_anchor_label": "codex_cli:gpt-5.5",
+    "standalone_anchor_candidates": [
+      {
+        "label": "codex_cli:gpt-5.5",
+        "harness": "cli_agent",
+        "backend": "codex_cli",
+        "model": "gpt-5.5"
+      },
+      {
+        "label": "claude_cli:opus",
+        "harness": "cli_agent",
+        "backend": "claude_cli",
+        "model": "opus",
+        "cli_model_id": "claude-opus-4-8[1m]"
+      },
+      {
+        "label": "gemini_cli:gemini-3.1-pro",
+        "harness": "cli_agent",
+        "backend": "gemini_cli",
+        "model": "gemini-3.1-pro"
+      }
+    ],
+    "standalone_anchor_run_all_candidates": true,
+    "standalone_anchor_strict_candidate_match": true,
+    "standalone_anchor_allow_llm_fallback": false,
+    "enable_progressive_rollout_allocation": true,
+    "max_progressive_rollout_waves": 6,
+    "progressive_stop_on_strong_signal": false,
+    "enable_residual_followup": true,
+    "max_selection_followup_rounds": 4,
+    "max_followup_iterations": 16,
+    "max_iterations_per_rollout": 60,
+    "allow_salvage": false,
+    "localizer_enforcement": "advisory",
+    "cli_agent_use_masai_preround": "structured_prompt",
+    "localizer_top_k": 4,
+    "enable_quick_verification": true,
+    "quick_verification_max_tests": 32,
+    "quick_verification_timeout_seconds": 900,
+    "enable_overlap_diversity_cap": false,
+    "use_worktree_pool": true,
+    "portfolio_seed_profile_count": 8,
+    "portfolio_diversity_include_prompt_strategy": true,
+    "portfolio_diversity_include_temperature": true,
+    "llm_profiles": [
+      {"rollout": 0, "reproducer": 0, "localizer": 0, "patcher": 0, "test_writer": 0},
+      {"rollout": 1, "reproducer": 1, "localizer": 1, "patcher": 1, "test_writer": 1},
+      {"rollout": 2, "reproducer": 2, "localizer": 2, "patcher": 2, "test_writer": 2},
+      {"rollout": 0, "reproducer": 1, "localizer": 1, "patcher": 0, "test_writer": 1},
+      {"rollout": 0, "reproducer": 2, "localizer": 2, "patcher": 0, "test_writer": 2},
+      {"rollout": 1, "reproducer": 0, "localizer": 0, "patcher": 1, "test_writer": 0},
+      {"rollout": 1, "reproducer": 2, "localizer": 2, "patcher": 1, "test_writer": 2},
+      {"rollout": 2, "reproducer": 0, "localizer": 0, "patcher": 2, "test_writer": 0}
+    ],
+    "diversity_temperatures": [0.0, 0.1, 0.2, 0.4, 0.6, 0.8],
+    "diversity_prompts": [
+      "minimal",
+      "comprehensive",
+      "test_driven",
+      "minimal",
+      "comprehensive",
+      "test_driven"
+    ]
+  },
+  "planning": {
+    "enable_manager_planner": true,
+    "planner_llm_index": 0,
+    "preplanner_llm_index": 1,
+    "enable_task_state_graph": true,
+    "enable_frontier_targeting": true,
+    "max_task_state_context_items": 8,
+    "max_frontier_targets": 16
+  },
+  "search": {
+    "mode": "puct",
+    "max_expansions": 64,
+    "max_depth": 6,
+    "max_frontier_branching": 12,
+    "persist_trace": true
+  },
+  "selection": {
+    "strategy": "multi_stage",
+    "enable_regression_pruning": true,
+    "cross_validation_enabled": true,
+    "enable_critic_reranking": true,
+    "use_critic": true,
+    "critic_weight": 0.2,
+    "selector_max_voters": 11,
+    "selector_max_iterations": 16,
+    "verification_timeout_seconds": 900,
+    "full_test_timeout_seconds": 7200,
+    "custom_test_timeout_seconds": 600,
+    "enable_patch_synthesis": true,
+    "max_synthesis_candidates": 8,
+    "max_synthesis_combinations": 12,
+    "preserve_standalone_anchor": true
+  },
+  "benchmark": {
+    "fairness_audit_mode": "parallel",
+    "report_headline_metric": "score_strict",
+    "commit0_official_audit_selected": true,
+    "commit0_official_audit_only_if_primary_passes": false,
+    "commit0_official_audit_parallelism": 1,
+    "commit0_evaluation_timeout_seconds": 21600,
+    "commit0_runtime_setup_timeout_seconds": 7200,
+    "commit0_dependency_install_timeout_seconds": 7200,
+    "testgeneval_apply_upstream_patches": false
+  },
+  "repo_memory": {
+    "enabled": false
+  },
+  "orchestration": {
+    "abstention_threshold": 0.5,
+    "active_learning_max_iterations": 6,
+    "testgen_allow_agentic_edit_loop": true
+  },
+  "save_trajectories": true,
+  "log_level": "INFO"
+}

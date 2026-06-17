@@ -1,0 +1,48 @@
+{
+  "_doc": "Per-repo Commit0 task overrides. Each entry corrects an environmental/setup issue in the upstream Commit0 dataset that has nothing to do with APEX's solving ability — published benchmark numbers should reflect what APEX can produce, not what the local sandbox can install. Loaded at module import by apex.evaluation.commit0_benchmark. Keys per entry: install_command (str), pre_install_drop_substrings (list[str]), pre_install_extra (list[str]), pip_packages_extra (list[str]), evaluation_timeout_seconds (int). python_version overrides are forbidden because Commit0 official Docker images own the scoring interpreter. The `_comment` field is informational and ignored by the loader.",
+  "babel": {
+    "_comment": "Babel's official Commit0 audit image runs Python 3.10, so keep the dataset Python version and let local validation catch any 3.12-only syntax. The CLDR import script also imports babel.localtime._helpers which is missing private symbols in the commit0 starting state, so download_import_cldr cannot run before APEX has done any work.",
+    "pre_install_drop_substrings": ["download_import_cldr"]
+  },
+  "joblib": {
+    "_comment": "`add-apt-repository --yes ppa:deadsnakes/nightly` requires launchpad.net auth which fails inside the apex Linux runtime container. The PPA only exists to install nightly Python; the runtime already provisions Python 3.12 via uv.",
+    "pre_install_drop_substrings": ["add-apt-repository"]
+  },
+  "pypdf": {
+    "_comment": "pypdf's install_command tacks on a `python -c 'from tests import download_test_pdfs; download_test_pdfs()'` step. That import triggers pypdf's _crypt_providers chain, incomplete in commit0 starting state. Tests download lazily anyway; install full crypto extras so encryption / image / cmap tests don't skip.",
+    "install_command": "pip install -e .",
+    "pip_packages_extra": ["cryptography", "Pillow"]
+  },
+  "dnspython": {
+    "_comment": "113 of dnspython's tests live behind optional `cryptography` extras (DNSSEC, DOH, DOQ). On macOS these silently skip; in the Linux container we install them so the audit can evaluate them. Without this, ~9% of the expected set is unreachable regardless of how good APEX's patch is.",
+    "pip_packages_extra": ["cryptography", "httpx[http2]", "aioquic"]
+  },
+  "imapclient": {
+    "_comment": "imapclient's setup.py runs `exec(open('imapclient/version.py').read(), {}, info)` and version.py calls `_imapclient_version_string` which isn't defined yet in the commit0 starting state. Prepend a stub so exec succeeds; post-install `git reset --hard HEAD` wipes the stub, so APEX still has to author the real implementation.",
+    "pre_install_extra": [
+      "python -c \"path='imapclient/version.py'; src=open(path).read(); open(path,'w').write('def _imapclient_version_string(*a,**kw):\\n    return \\\"0.0.0+commit0stub\\\"\\n'+src)\""
+    ]
+  },
+  "voluptuous": {
+    "_comment": "voluptuous's setup.py does `version = __import__('voluptuous').__version__`, which transitively pulls in dozens of half-stubbed decorators (raises, truth, message, ...). Implementing them all here would just duplicate APEX's job. Swap voluptuous/__init__.py for a one-line stub that exports a synthetic __version__ so setup.py succeeds; post-install `git reset --hard HEAD` restores the real __init__.py.",
+    "pre_install_extra": [
+      "python -c \"open('voluptuous/__init__.py','w').write('__version__ = \\\"0.0.0+commit0stub\\\"\\n')\""
+    ]
+  },
+  "web3.py": {
+    "_comment": "web3.py's historical async tests apply pytest marks to fixtures; pytest 9 promotes that deprecated pattern to a PytestRemovedIn9Warning collection error. Its websocket timeout fixture also uses legacy top-level websockets.serve semantics; websockets 16 switched that symbol to the new asyncio API and the server thread dies before the provider timeout path is exercised.",
+    "pip_packages_extra": ["pytest<9", "websockets<12"]
+  },
+  "filesystem_spec": {
+    "_comment": "The dataset's pre_install runs `bash ci/install_s3fs.sh` which invokes a bare `pip` (not the venv's pip) and dies with `pip: command not found`. The s3fs extras only matter for S3-backed tests we can't reach in air-gapped mode anyway.",
+    "pre_install_drop_substrings": ["install_s3fs"]
+  },
+  "tlslite-ng": {
+    "_comment": "tlslite-ng's unit_tests/ takes >5400s to BASELINE on macOS without OpenSSL pkg-config bindings (cryptography falls back to pure-Python primitives). Raise the per-repo evaluation timeout so we record the baseline + run rollouts; the ratio gate further down still gates correctness.",
+    "evaluation_timeout_seconds": 10800
+  },
+  "statsmodels": {
+    "_comment": "Largest Commit0 suite (17669 expected tests); the official audit runs pytest single-process under a whole-suite timeout, so even a fully-correct patch can exceed the global evaluation timeout and be scored a failure ('Test timed out'). Raise only the per-repo evaluation timeout; the missing>0 expected-coverage gate still enforces honest full-coverage. No build pins/install_command — the official Docker image owns the numpy/scipy/cython/fortran toolchain.",
+    "evaluation_timeout_seconds": 10800
+  }
+}
