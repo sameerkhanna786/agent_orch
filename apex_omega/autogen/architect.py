@@ -178,6 +178,19 @@ def build_repo_map(source_repo: str, *, base_commit: Optional[str] = None,
     return repo_map
 
 
+# Pipeline-vs-parallel decision rule (dynamic-workflows parity §4.1), taught to the author so
+# generated orchestrations default to the latency-optimal primitive.
+_PIPELINE_VS_PARALLEL_RULE = (
+    "\nDECISION RULE — pipeline vs parallel: DEFAULT to ctx.pipeline(items, *stages) for "
+    "independent per-item multi-stage work so fast items never wait for slow ones. Reach for "
+    "ctx.parallel(thunks) ONLY when a downstream step needs ALL prior results at once "
+    "(ctx.select, global dedup, cross-item ranking, early-exit on a total). A transform with no "
+    "cross-item dependency belongs INSIDE a pipeline stage, not behind a parallel barrier. Use "
+    "ctx.signals(thunks) for read-only verifier/judge fan-out (it does NOT advance the "
+    "non-progress plateau, so a verify wave is never mistaken for a solve wave).\n"
+)
+
+
 def build_author_prompt(repo_map: dict) -> str:
     # The author prompt carries the API/invariants for writing orchestrate(ctx), the orchestrator's
     # OWN scouting (the repo map), and the BINDING TASK-FRAMING rules. NO harness-derived "design
@@ -192,7 +205,7 @@ def build_author_prompt(repo_map: dict) -> str:
     return (
         "Write a Python function `orchestrate(ctx)` tailored to THIS repository to "
         "solve its task with the fewest agents necessary, escalating until a verified "
-        "pass.\n\n" + API_REFERENCE + "\n" + INVARIANTS + framing_block +
+        "pass.\n\n" + API_REFERENCE + "\n" + INVARIANTS + _PIPELINE_VS_PARALLEL_RULE + framing_block +
         "\nDISCOVERED REPOSITORY MAP:\n" + json.dumps(rmap, indent=2)[:6000] +
         "\n\nREFERENCE EXEMPLAR (a safe completion-first best-of-N you can adapt or "
         "improve on — e.g. decompose by module, pipeline stages, route hard work to a "
@@ -399,6 +412,7 @@ def autosolve(
     repair_iters: int = 0,
     expected_ids_sha: str = "",
     scoring_env_sha: str = "",
+    args: Any = None,
 ) -> dict:
     """Scout -> author -> freeze -> sandboxed execute, with fail-open to the
     verified best-of-N floor.  When ``scout_agents > 0`` an agent fan-out decides
@@ -460,6 +474,7 @@ def autosolve(
         base_commit=base_commit, score_fn=score_fn, prompt_builder=prompt_builder,
         repo_map=repo_map, abl=abl, run_scope=run_scope, max_agents=effective_max,
         initial_agents=init_agents, timeout_seconds=timeout_seconds, repair_iters=repair_iters,
+        args=args,
     )
     # review-fix #13: make the journaled-score drift keys content-bearing (they default ""
     # and were never set, so the score key relied on diff_sha alone). Now a legitimate

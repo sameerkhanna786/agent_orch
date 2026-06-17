@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional, Sequence
 from ..ablation.arms import AblationConfig
 from ..engine.governor import RunGovernor
 from ..engine.runtime import Engine
-from ..errors import CutLosses, PlateauStop
+from ..errors import CutLosses, FailLoud, PlateauStop
 from ..isolation.worktree import WorktreeProvider, apply_diff
 from ..kernel.select import Candidate, select_best
 from ..kernel.verify import VerificationResult, candidate_from_verification
@@ -111,12 +111,23 @@ class OrchestrationContext:
         timeout_seconds: Optional[int] = None,
         strategies: Sequence[str] = DEFAULT_STRATEGIES,
         repair_iters: int = 0,
+        args: Any = None,
+        node_ns: str = "",
+        nesting_depth: int = 0,
     ):
         self._engine = engine
         self._executor = executor
         self._worker_specs = list(worker_specs)
         self._score_fn = score_fn
         self._prompt_builder = prompt_builder
+        # dynamic-workflows parity: the launch payload (ctx.args) + composition state. node_ns
+        # namespaces this context's journal node-ids / worktree ids so a NESTED ctx.workflow()
+        # child cannot collide with the parent on resume (default "" => unchanged for the root).
+        self._args = args
+        self._node_ns = str(node_ns or "")
+        self._nesting_depth = int(nesting_depth)
+        self._base_commit = base_commit
+        self._run_scope = run_scope
         self.repo_map = dict(repo_map or {})
         self._abl = abl or AblationConfig()
         self.strategies = tuple(strategies)
@@ -380,8 +391,9 @@ class OrchestrationContext:
             return {"continue": bool(cont), "reason": str(reason)}
 
         d, _hit = resume_or_run_json(
-            self._engine.journal, {"kind": "wave", "scoped_inputs": {"wave": n}},
-            _decide, kind="wave", node_id=f"wave{n}")
+            self._engine.journal,
+            {"kind": "wave", "scoped_inputs": {"wave": (f"{self._node_ns}{n}" if self._node_ns else n)}},
+            _decide, kind="wave", node_id=f"{self._node_ns}wave{n}")
         if isinstance(d, dict):
             cont = bool(d.get("continue", True))
             reason = str(d.get("reason") or "")
@@ -427,6 +439,47 @@ class OrchestrationContext:
 
     def pipeline(self, items: Sequence[Any], *stages: Any, **kw) -> list:
         return self._engine.pipeline(items, *stages, **kw)
+
+    # ---- dynamic-workflows parity: launch payload (args) + nested composition (workflow) ----
+    @property
+    def args(self) -> Any:
+        """The launch payload passed to this orchestration (== dynamic-workflows ``args``).
+        Falls back to ``repo_map['args']`` so an eval harness can stash it there."""
+        return self._args if self._args is not None else (self.repo_map or {}).get("args")
+
+    def _spawn_child(self, *, args: Any = None) -> "OrchestrationContext":
+        """A child context that SHARES this engine (shared agent counter / token budget /
+        concurrency cap) for ctx.workflow() composition, with a NAMESPACED journal so its nodes
+        never collide with the parent's on resume."""
+        child = OrchestrationContext(
+            self._engine, executor=self._executor, worker_specs=self._worker_specs,
+            source_repo=self._source_repo, base_commit=self._base_commit,
+            score_fn=self._score_fn, prompt_builder=self._prompt_builder,
+            repo_map=self.repo_map, abl=self._abl, run_scope=self._run_scope,
+            max_agents=self.max_agents, initial_agents=self.initial_agents,
+            sandbox=self.sandbox, timeout_seconds=self.timeout_seconds,
+            strategies=self.strategies, repair_iters=self.repair_iters, args=args,
+            node_ns=f"{self._node_ns}w{self._nesting_depth + 1}_",
+            nesting_depth=self._nesting_depth + 1,
+        )
+        child.expected_ids_sha = self.expected_ids_sha
+        child.scoring_env_sha = self.scoring_env_sha
+        return child
+
+    def workflow(self, name_or_ref: Any, args: Any = None) -> Any:
+        """Compose another orchestration inline (== dynamic-workflows ``workflow()``): resolve a
+        named (catalog) or by-ref ({"scriptPath": ...}) ``orchestrate(ctx)`` source, run it in a
+        CHILD context that SHARES this engine (so the agent counter, token budget, and concurrency
+        cap are shared), and return its result. Limited to ONE level deep (a child cannot nest)."""
+        from .catalog import resolve_workflow
+        from .sandbox import run_orchestration
+        if self._nesting_depth >= 1:
+            raise FailLoud("ctx.workflow() nesting is limited to one level deep")
+        source = resolve_workflow(name_or_ref)
+        label = name_or_ref.get("scriptPath") if isinstance(name_or_ref, dict) else str(name_or_ref)
+        child = self._spawn_child(args=args)
+        self.log(f"workflow: running nested '{label}' (shared engine; ns={child._node_ns!r})")
+        return run_orchestration(source, child)
 
     # ---- composable quality patterns (Backbone 2.3) ----
     # Thin host-side wrappers over apex_omega/patterns. Each degrades to plain best-of-N
@@ -480,9 +533,9 @@ class OrchestrationContext:
         if spec is None:
             spec = self._worker_specs[aid % len(self._worker_specs)]
         try:
-            handle = self._provider.acquire(f"{prefix}{aid}")
+            handle = self._provider.acquire(f"{self._node_ns}{prefix}{aid}")
         except Exception as exc:
-            self.log(f"attempt {prefix}{aid}: worktree acquire failed: {exc}")
+            self.log(f"attempt {self._node_ns}{prefix}{aid}: worktree acquire failed: {exc}")
             return None
         try:
             wt = handle.path
@@ -490,6 +543,8 @@ class OrchestrationContext:
             scoped = {"repo_snapshot_sha": self._provider.base_commit, "attempt": aid, "strategy": strategy}
             if scoped_extra:
                 scoped.update(scoped_extra)
+            if self._node_ns:           # namespace the CACHE KEY for a nested child (root unchanged)
+                scoped["ns"] = self._node_ns
             res = self._engine.agent(
                 # internet stays OFF (iron-tight: no network egress — the agent must NOT be able
                 # to fetch the upstream package). We do NOT enable internet to avoid the abort:
@@ -499,7 +554,7 @@ class OrchestrationContext:
                 ScopedTask(prompt=prompt, sandbox=self.sandbox,
                            model=model or spec.model, vendor=spec.vendor,
                            timeout_seconds=self.per_agent_timeout_seconds, scoped_inputs=scoped),
-                lambda t: session.run(t), node_id=f"{node_prefix}{aid}",
+                lambda t: session.run(t), node_id=f"{self._node_ns}{node_prefix}{aid}",
                 cli_version=getattr(session, "cli_version", ""),
                 materialize=lambda diff, _wt=wt: _materialize_cached_diff(_wt, diff),
             )
@@ -519,7 +574,7 @@ class OrchestrationContext:
             if meta_extra:
                 meta.update(meta_extra)
             cand = candidate_from_verification(
-                candidate_id=f"{prefix}{aid}", diff=res.fs_diff, vr=vr,
+                candidate_id=f"{self._node_ns}{prefix}{aid}", diff=res.fs_diff, vr=vr,
                 rollout_id=aid, cluster_id=aid, meta=meta,
             )
             # record (never penalize) escape/cheat attempts — telemetry only.
@@ -587,8 +642,9 @@ class OrchestrationContext:
                 ScopedTask(prompt=str(prompt), schema=schema, sandbox="read-only",
                            model=model or spec.model, vendor=spec.vendor,
                            timeout_seconds=self.per_agent_timeout_seconds,
-                           scoped_inputs={"ask": aid, "repo_snapshot_sha": self._provider.base_commit}),
-                lambda t: session.run(t), node_id=f"ask{aid}",
+                           scoped_inputs={"ask": (f"{self._node_ns}{aid}" if self._node_ns else aid),
+                                          "repo_snapshot_sha": self._provider.base_commit}),
+                lambda t: session.run(t), node_id=f"{self._node_ns}ask{aid}",
                 cli_version=getattr(session, "cli_version", ""), agent_type="ask",
             )
         except Exception as exc:

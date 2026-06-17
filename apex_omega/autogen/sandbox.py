@@ -25,6 +25,19 @@ _FORBIDDEN_NAMES = frozenset({
     "os", "sys", "subprocess", "socket", "time", "random", "datetime", "threading",
     "multiprocessing", "pathlib", "shutil", "importlib", "ctypes", "pickle", "marshal",
     "builtins", "__builtins__", "help",
+    # non-deterministic builtins: hash() is per-process salted (PYTHONHASHSEED) and id() is an
+    # address — both diverge across a resume/restart and would break journal-prefix replay.
+    "hash", "id", "uuid",
+})
+
+# Non-deterministic METHOD calls (caught as ``x.now()`` etc.) — even though the module names
+# (time/random/datetime/uuid) are already forbidden, an object could still expose these, and a
+# resume must replay identically. Flag the call by method name so authored control flow can never
+# branch on a clock/RNG/uuid (which would diverge from the journaled prefix on replay).
+_NONDET_METHODS = frozenset({
+    "now", "today", "utcnow", "time", "monotonic", "perf_counter", "process_time",
+    "random", "uniform", "randint", "randrange", "choice", "shuffle", "sample", "getrandbits",
+    "uuid1", "uuid3", "uuid4", "uuid5",
 })
 
 # Cardinal Contract, enforced structurally (Backbone 2.2): authored code may READ a
@@ -46,7 +59,10 @@ SAFE_BUILTINS: dict[str, Any] = {
         "list", "dict", "set", "tuple", "frozenset", "bytes", "bytearray",
         # scalars / conversions
         "str", "int", "float", "bool", "complex", "ord", "chr", "bin", "hex", "oct",
-        "ascii", "repr", "format", "divmod", "pow", "hash",
+        "ascii", "repr", "format", "divmod", "pow",
+        # NOTE: `hash` is deliberately EXCLUDED — Python salts str/bytes hashing per process
+        # (PYTHONHASHSEED), so hash() diverges across a resume/restart and would break the
+        # journal's longest-unchanged-prefix replay. Use a stable key (sorted/repr) instead.
         # introspection-lite (dunder ATTRIBUTE access is still blocked by the lint,
         # so these can't be used to escape — they just stop normal idioms NameError-ing)
         "type", "isinstance", "issubclass", "hasattr", "callable", "object",
@@ -96,6 +112,10 @@ def lint_source(source: str) -> LintResult:
             # same guard for the dict-style write `c["accepted"] = True` (Candidate.__setitem__
             # does not exist, but block it structurally regardless, at any nesting depth).
             violations.append(f"cannot bind execution-gate key '{node.slice.value}' (line {node.lineno})")
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr in _NONDET_METHODS):
+            # x.now()/x.uuid4()/x.random()/... — non-deterministic; would diverge on replay.
+            violations.append(f"non-deterministic call '.{node.func.attr}()' (line {node.lineno})")
         elif isinstance(node, (ast.With, ast.AsyncWith, ast.AsyncFor, ast.AsyncFunctionDef, ast.Await)):
             violations.append(f"async/with construct forbidden (line {node.lineno})")
         elif isinstance(node, ast.Lambda):
