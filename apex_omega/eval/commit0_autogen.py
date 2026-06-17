@@ -449,7 +449,11 @@ def run_autogen_cell(
             "agent_budget": result.get("agent_budget"),
             "scout": result.get("scout"),
             "agent_ceiling": agent_ceiling,
+            "solved": solved,
             "abstained": bool(result.get("abstained")),
+            # CUT-LOSSES: surface the governor's non-progress cut reason (if any) so the
+            # reclassifier/ledger books a cut as a diagnosable FAILURE, not infra/timeout.
+            "cut_losses": result.get("cut_losses"),
             "orchestration": result.get("orchestration"),
             "budget": result.get("budget"),
             "winner": winner or None,

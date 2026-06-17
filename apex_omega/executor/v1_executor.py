@@ -140,6 +140,16 @@ class V1Session:
         """Run one scoped task.  NEVER raises (typed-failure contract)."""
         start = time.monotonic()
         allow_edits = task.sandbox != "read-only"
+        # codex sets CODEX_HOME=.codex (relative to the worktree cwd) and aborts hard with
+        # "Error finding codex home: ... does not exist" -> empty/infra_nonresult result if that
+        # dir is absent. v1 only creates it by copying host ~/.codex/auth.json, which does NOT
+        # exist under Meta gateway (x2p) auth (auth is via CODEX_BASE_URL, not a file). Create the
+        # rollout CODEX_HOME defensively so codex always finds its home (gateway auth still wins).
+        if self.vendor in ("codex_cli", "codex"):
+            try:
+                Path(self.cwd, ".codex").mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
         try:
             client = self._ensure_client()
             res = client.run_structured_prompt(
