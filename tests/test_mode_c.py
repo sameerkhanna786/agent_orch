@@ -108,6 +108,10 @@ def test_run_cell_routes_autogen_to_mode_c(monkeypatch):
     without any paid call."""
     rd = tempfile.mkdtemp()
     driver = Commit0EvalDriver(rd, _base_cfg(), autogen_max_agents=7, autogen_author=False)
+    # the per-cell auth preflight makes a real vendor probe — stub it so this routing test stays
+    # paid-call-free (auth preflight is exercised in tests/test_auth_preflight.py).
+    import apex_omega.executor.auth_env as _ae
+    monkeypatch.setattr(_ae, "refresh_vendor_auth", lambda v, **k: (True, "test"))
 
     called = {"autogen": 0, "subprocess": 0, "kwargs": None}
 
@@ -144,6 +148,8 @@ def test_run_cell_routes_nonautogen_to_subprocess(monkeypatch):
     """A normal (best_of_n) arm must still go through the v1 subprocess path."""
     rd = tempfile.mkdtemp()
     driver = Commit0EvalDriver(rd, _base_cfg())
+    import apex_omega.executor.auth_env as _ae
+    monkeypatch.setattr(_ae, "refresh_vendor_auth", lambda v, **k: (True, "test"))
 
     called = {"autogen": 0, "subprocess": 0}
 

@@ -229,10 +229,19 @@ def run_autogen_cell(
             _load_expected_test_ids,
         )
         from ..autogen import autosolve
+        from ..executor.auth_env import preflight_vendor_auth
         from ..executor.v1_executor import V1Executor
 
         os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+        # --- 0) AUTH PREFLIGHT: refresh + validate vendor auth BEFORE prep/agents, so a stale
+        # gateway token never silently burns the whole cell on 0-token infra_nonresult results
+        # (it warms the host auth the sandboxed rollout agents reuse). Fails loud if auth is dead.
+        _vendors = [str(e.get("backend") or "codex_cli")
+                    for e in (cfg_dict.get("llm_configs") or [])] or ["codex_cli"]
+        _auth = preflight_vendor_auth(_vendors)
+        engine.log(f"auth preflight: {_auth}")
 
         # --- 1) build the v1 runner (force LOCAL no-Docker scoring) -------------
         local_cfg = _force_local_config_dict(cfg_dict)

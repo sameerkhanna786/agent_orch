@@ -191,6 +191,13 @@ class Commit0EvalDriver:
             self.engine.log(f"running commit0 cell arm={arm.id} repo={repo} limit={limit} "
                             f"local_runnable={spec.local_runnable} "
                             f"mode={'autogen' if is_autogen else 'v1_subprocess'}")
+            # AUTH PREFLIGHT (both modes): refresh + validate vendor auth BEFORE the cell dispatches
+            # agents, so a stale gateway token never silently burns the cell on 0-token
+            # infra_nonresult results. Memoized per-process; fails loud if auth is dead.
+            from ..executor.auth_env import preflight_vendor_auth
+            _vendors = [str(e.get("backend") or "codex_cli")
+                        for e in (cfg_dict.get("llm_configs") or [])] or ["codex_cli"]
+            self.engine.log(f"auth preflight: {preflight_vendor_auth(_vendors)}")
             if is_autogen:
                 return self._invoke_autogen(cfg_dict, repo, output_dir=str(cell_out),
                                             fallback_rev=spec.dataset_fallback_revision)
