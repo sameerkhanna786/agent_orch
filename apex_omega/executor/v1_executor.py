@@ -136,6 +136,21 @@ class V1Session:
     def observe_diff(self) -> str:
         return self.observe()
 
+    def _debug_dump(self, payload: dict) -> None:
+        """Append a one-line JSON agent-dispatch record to the path in APEX_OMEGA_DEBUG_AGENT
+        (no-op when unset). Used to capture the EXACT codex inputs/outputs inside a real eval run
+        to root-cause the 0-token failure that does not reproduce in isolation."""
+        import os as _os
+        path = _os.environ.get("APEX_OMEGA_DEBUG_AGENT")
+        if not path:
+            return
+        try:
+            import json as _json
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(_json.dumps(payload, default=lambda o: str(o)[:500])[:8000] + "\n")
+        except Exception:
+            pass
+
     def run(self, task: ScopedTask) -> ExecResult:
         """Run one scoped task.  NEVER raises (typed-failure contract)."""
         start = time.monotonic()
