@@ -14,10 +14,17 @@ from ..errors import PlateauStop
 
 
 def loop_until_dry(ctx, make_round, *, k_dry: int = 2, max_rounds: int = 64,
-                   stop_on_accept: bool = True):
+                   stop_on_accept: bool = True, key=None, seen=None):
+    """Keep running rounds until the work runs dry. By default a round is "dry" when it adds no
+    new best pass-rate. For unknown-size DISCOVERY, pass ``key=callable`` (and optionally a shared
+    ``seen`` set): each round's candidates are deduped vs everything SEEN, the new keys are added
+    to ``seen`` BEFORE counting, and a round with NO new keys is dry — the convergence rule from
+    the paradigm (dedupe against everything seen, NOT just confirmed, or rejected items reappear
+    and the loop never converges)."""
     produced: list = []
     best = -1.0
     dry = 0
+    seen = seen if seen is not None else set()
     for i in range(max(1, max_rounds)):
         thunks = list(make_round(i) or [])
         if not thunks:
@@ -30,6 +37,24 @@ def loop_until_dry(ctx, make_round, *, k_dry: int = 2, max_rounds: int = 64,
         produced.extend(round_cands)
         if stop_on_accept and any(getattr(c, "accepted", False) for c in round_cands):
             break
+        if key is not None:
+            # DISCOVERY mode: dry iff no NEW item key this round (dedupe vs everything SEEN).
+            fresh = 0
+            for c in round_cands:
+                try:
+                    k = key(c)
+                except Exception:
+                    continue
+                if k not in seen:
+                    seen.add(k)
+                    fresh += 1
+            if fresh > 0:
+                dry = 0
+            else:
+                dry += 1
+                if dry >= max(1, k_dry):
+                    break
+            continue
         rbest = max((float(c.public_signal_score or 0.0) for c in round_cands), default=-1.0)
         if rbest > best + 1e-9:
             best = rbest

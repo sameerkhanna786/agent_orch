@@ -177,6 +177,10 @@ class OrchestrationContext:
         self._halt_is_cut = False
         self._halted = False
         self._all_candidates: list = []
+        # IOU / blocked-on ledger (ctx.defer): a structured deferral sentinel (the paradigm's
+        # todo!("blocked_on: X::Y")) so a bounded loop can record an unresolved item and TERMINATE,
+        # handing it to a downstream phase instead of spinning or dropping it silently.
+        self._iou: list = []
         # Repair/ralph parent-diff carry limit (chars). Default truncates (a Reflexion hint);
         # the ralph baseline raises it so its sequential lineage carries the full accumulated
         # diff (naive-persistence fidelity).
@@ -491,6 +495,12 @@ class OrchestrationContext:
         from ..patterns import adversarial_verify as _f
         return _f(self, candidate, **kw)
 
+    def adversarial_filter(self, items, **kw):
+        """ADMIT-gate plain-data items (findings/claims): keep only those that SURVIVE N
+        read-only skeptics. Never touches Candidate.accepted (Cardinal Contract)."""
+        from ..patterns import adversarial_filter as _f
+        return _f(self, items, **kw)
+
     def judge_panel(self, candidates, **kw):
         from ..patterns import judge_panel as _f
         return _f(self, candidates, **kw)
@@ -506,6 +516,20 @@ class OrchestrationContext:
     def completeness_critic(self, candidate, **kw):
         from ..patterns import completeness_critic as _f
         return _f(self, candidate, **kw)
+
+    # ---- IOU / blocked-on deferral (bounded-loop termination, dynamic-workflows parity) ----
+    def defer(self, scope: str, item: Any, reason: str = "") -> dict:
+        """Record an unresolved item as a structured IOU (== ``todo!("blocked_on: scope::item")``)
+        so a bounded loop can stop instead of spinning, deferring resolution to a downstream phase.
+        Returns the recorded record; read them back with ``ctx.blocked()``."""
+        rec = {"scope": str(scope), "item": item, "reason": str(reason or "")}
+        self._iou.append(rec)
+        self.log(f"defer: blocked_on {scope}::{item}" + (f" ({reason})" if reason else ""))
+        return rec
+
+    def blocked(self, scope: Optional[str] = None) -> list:
+        """The IOU/blocked-on deferrals recorded via ``ctx.defer`` (optionally filtered by scope)."""
+        return [r for r in self._iou if scope is None or r.get("scope") == scope]
 
     # ---- the core unit of work: one verified attempt ----
     def _next_attempt_id(self) -> int:

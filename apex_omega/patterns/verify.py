@@ -87,3 +87,48 @@ def adversarial_verify(ctx, candidate, *, n: int = 1, lenses=None, refute_if="ma
         ctx.log(f"adversarial_verify: {refutes}/{m} refuted {candidate.candidate_id} -> downgraded")
         candidate.refute()
     return candidate
+
+
+def _need(refute_if, n: int) -> int:
+    if isinstance(refute_if, int) and not isinstance(refute_if, bool):
+        return max(1, refute_if)
+    if refute_if == "any":
+        return 1
+    if refute_if == "all":
+        return n
+    return n // 2 + 1                     # majority (default)
+
+
+def adversarial_filter(ctx, items, *, votes: int = 3, to_text=None, refute_if="majority",
+                       base_id: int = 950000, vendor=None, model=None):
+    """ADMIT-gate for PLAIN-DATA items (audit findings, extracted claims, ...): each item faces
+    ``votes`` independent read-only skeptics prompted to REFUTE it as a false positive; an item is
+    ADMITTED (kept, in order) only if it SURVIVES (refutations below the threshold). Distinct from
+    ``adversarial_verify`` (which downgrades an execution-accepted Candidate) — this filters
+    arbitrary items and NEVER touches Candidate.accepted, so the Cardinal Contract is preserved.
+    Uses ``ctx.signals`` (read-only fan-out; does not advance the plateau). ``votes<=0`` -> identity;
+    a finding with NO usable verdicts is kept (fail-open — never silently dropped)."""
+    items = list(items or [])
+    if votes <= 0 or not items:
+        return items
+    to_text = to_text or (lambda x: x if isinstance(x, str) else repr(x))
+    survivors: list = []
+    for idx, item in enumerate(items):
+        text = str(to_text(item))[:6000]
+
+        def _ask(j, _t=text, _idx=idx):
+            return lambda: ctx.ask(
+                "You are an ADVERSARIAL reviewer. Try to REFUTE the following finding/claim as a "
+                "FALSE POSITIVE. Refute ONLY with concrete reasoning; if you cannot, return "
+                f"refuted=false.\n\nFINDING:\n{_t}\n\nReturn JSON {{refuted, confidence, reason}}.",
+                schema=VERDICT_SCHEMA, vendor=vendor, model=model,
+                agent_id=base_id + _idx * 100 + j)
+
+        verdicts = [v for v in ctx.signals([_ask(j) for j in range(votes)]) if isinstance(v, dict)]
+        if not verdicts:
+            survivors.append(item)               # fail-open: keep when no usable verdict
+            continue
+        refutes = sum(1 for v in verdicts if v.get("refuted") is True)
+        if refutes < _need(refute_if, votes):
+            survivors.append(item)
+    return survivors

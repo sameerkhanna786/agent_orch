@@ -110,3 +110,56 @@ def test_child_journal_nodes_are_namespaced_no_collision():
     child_c = child.solve_attempt(attempt_id=0)
     assert parent_c.candidate_id == "a0"
     assert child_c.candidate_id == "w1_a0" and child_c.candidate_id != parent_c.candidate_id
+
+
+# --- IOU / defer (1.2) ---------------------------------------------------------
+def test_ctx_defer_and_blocked():
+    ctx = _ctx()
+    ctx.defer("imports", "pkg.mod", "circular import")
+    ctx.defer("api", "Foo.bar")
+    assert len(ctx.blocked()) == 2
+    only = ctx.blocked(scope="imports")
+    assert len(only) == 1 and only[0]["item"] == "pkg.mod" and only[0]["reason"] == "circular import"
+
+
+# --- loop_until_dry SEEN item dedup (1.3) --------------------------------------
+def test_loop_until_dry_converges_on_no_new_keys():
+    # identical candidate every round -> after k_dry rounds with no NEW key, the loop stops
+    # (dedupe-vs-SEEN convergence), well before max_rounds.
+    def fixed_responder():
+        def r(task, session):
+            Path(session.cwd, "mod.py").write_text("def f():\n    return 7\n")
+            return ExecResult(final_message="x", ok=True, finalization_status="completed",
+                              fs_diff="--- fixed ---", usage=TokenUsage(input=1, output=1))
+        return r
+    ctx = _ctx(responder=fixed_responder(), accept=False)
+    rounds = {"n": 0}
+
+    def make_round(i):
+        rounds["n"] += 1
+        return [lambda i=i: ctx.solve_attempt(attempt_id=1000 + i)]
+
+    produced = ctx.loop_until_dry(make_round, k_dry=2, max_rounds=64,
+                                  key=lambda c: c.content_sha)
+    assert rounds["n"] <= 4          # converged early (round0 new key, then 2 dry -> stop)
+    assert produced                  # but did produce the candidates it saw
+
+
+# --- adversarial_filter admit gate (1.1) ---------------------------------------
+def _filter_responder():
+    def r(task, session):
+        if getattr(task, "schema", None):              # a read-only ask
+            refuted = "REFUTE-ME" in (task.prompt or "")
+            return ExecResult(final_message="", structured_output={"refuted": refuted},
+                              ok=True, finalization_status="completed", usage=TokenUsage(input=1, output=1))
+        return ExecResult(final_message="x", ok=True, finalization_status="completed",
+                          usage=TokenUsage(input=1, output=1))
+    return r
+
+
+def test_adversarial_filter_admits_only_survivors():
+    ctx = _ctx(responder=_filter_responder())
+    kept = ctx.adversarial_filter(["keep this finding", "REFUTE-ME false positive"], votes=3)
+    assert kept == ["keep this finding"]              # the majority-refuted item is dropped
+    # votes<=0 is identity; never touches Candidate.accepted (plain-data only)
+    assert ctx.adversarial_filter(["a", "b"], votes=0) == ["a", "b"]
