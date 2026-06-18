@@ -11576,6 +11576,14 @@ class CLIModelClient:
                 command.append("--skip-git-repo-check")
                 command.append("--dangerously-bypass-approvals-and-sandbox")
             elif _env_flag_enabled("APEX_CODEX_BYPASS_SANDBOX") and not target_runtime_enforced:
+                # The Meta codex launcher self-applies Seatbelt; its in-process
+                # app-server then fails with "Operation not permitted (os error 1)"
+                # unless we also disable the launcher's osx sandbox. The
+                # host_cli_read_jail branch above does this and adds an OUTER
+                # sandbox-exec wrap for isolation; the bypass path intentionally
+                # runs fully unsandboxed (validated to produce tokens), so it must
+                # still disable the launcher sandbox here or the app-server EPERMs.
+                command.append("--dangerously-disable-osx-sandbox")
                 command.append("exec")
                 if codex_resume_thread_id:
                     command.append("resume")

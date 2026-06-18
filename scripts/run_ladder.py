@@ -259,6 +259,16 @@ def run_cell(label: str, flags: list[str], repo: str, env_overlay: dict | None =
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     env.setdefault("HF_DATASETS_OFFLINE", "1")
     env.setdefault("HF_HUB_OFFLINE", "1")
+    # 0-token blocker fix (2026-06-17, validated voluptuous 1/1): the rollout codex was
+    # double-sandboxed (outer sandbox-exec read-jail -> "os error 2" ENOENT) sitting on top of
+    # the Meta codex launcher's own seatbelt ("os error 1" EPERM, in-process app-server) -> every
+    # agent returned 0 tokens / infra_nonresult. Run codex FULLY UNSANDBOXED for this LOCAL eval:
+    # disable the outer read-jail AND take the bypass branch (which now also passes
+    # --dangerously-disable-osx-sandbox, the launcher flag). The git worktree + container
+    # sanitizer provide the isolation that matters for the benchmark. setdefault so an operator
+    # who wants the credential read-jail back can set APEX_HOST_CLI_READ_JAIL=1.
+    env.setdefault("APEX_HOST_CLI_READ_JAIL", "0")
+    env.setdefault("APEX_CODEX_BYPASS_SANDBOX", "1")
     if env_overlay:                           # per-cell overlay (e.g. design-contract A/B)
         env.update(env_overlay)
     t0 = time.monotonic()
