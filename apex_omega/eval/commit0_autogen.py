@@ -319,6 +319,70 @@ def run_autogen_cell(
             )
             return issue + plan + hint
 
+        # --- two convergence prompt CONTRACTS (share the issue/expected-ids closure) ----------
+        # Both PREFIX the verbatim issue description (fairness firewall: TASK_FRAMING_BLOCK + gold
+        # inventory must stay intact; the briefs add SCOPE + FEEDBACK, never answers). They are
+        # passed via the prompt= override on the convergence seams (solve_module / repair_residual);
+        # the convergence default uses the seams' built-in briefs by default, but these expose the
+        # eval's richer issue text + scout plan for the as-run eval path.
+        def _issue_and_plan(ctx) -> str:
+            issue = task.build_issue_description(
+                test_command,
+                expected_test_count=(len(expected_ids) or None),
+                expected_test_ids=expected_ids or None,
+            )
+            approach = (ctx.repo_map.get("approach") or "").strip()
+            key_files = ctx.repo_map.get("key_files") or []
+            plan = ""
+            if approach:
+                plan += f"\n\nScout completion plan:\n{approach[:2000]}"
+            if key_files:
+                plan += f"\n\nLikely key files: {', '.join(map(str, key_files[:20]))}"
+            return issue + plan
+
+        def module_solve_brief(ctx, module: str, module_gold_ids, *, carry_nonempty: bool) -> str:
+            """CONTRACT 1 — module-scoped solve (delegation: objective / output / boundaries /
+            tool-guidance). Scopes ONE agent to a single module + its gold subset."""
+            ids = "\n".join(map(str, (module_gold_ids or [])[:60])) or "(infer from the module's tests)"
+            carry = ("\nFiles partially implemented by earlier agents are PRESENT in this "
+                     "workspace — build ON them, do not revert.\n" if carry_nonempty else "")
+            return (
+                _issue_and_plan(ctx)
+                + "\n\n--- MODULE-SCOPED SOLVE ---\n"
+                + f"OBJECTIVE: implement ONLY the module `{module}`. Make EXACTLY these gold tests "
+                + "pass — other modules are handled by parallel agents, so do NOT reimplement the "
+                + "whole repo:\n" + ids + "\n"
+                + "BOUNDARIES: edit only files belonging to this module; do NOT edit/add/delete any "
+                + "test file; do not touch other modules (note any genuinely-missing shared symbol "
+                + "for the reducer instead of forking it).\n"
+                + carry
+                + "TOOL-GUIDANCE: run the scoped subset and iterate until that subset is green.\n"
+            )
+
+        def residual_repair_brief(ctx, failing_nodeids, passed: int, total: int, *,
+                                  excerpts: str = "") -> str:
+            """CONTRACT 2 — residual repair on the LIVE merged tree, scoped to the exact still-
+            failing node-ids. Excerpts (real assertion tails) injected when provided."""
+            ids = "\n".join(map(str, (failing_nodeids or [])[:40])) or "(see the failing subset)"
+            evidence = (("\nFailure evidence:\n" + excerpts + "\n") if (excerpts or "").strip() else "")
+            return (
+                _issue_and_plan(ctx)
+                + "\n\n--- RESIDUAL REPAIR (live merged tree) ---\n"
+                + f"STATE: {int(passed)} of {int(total)} gold tests pass. The merged implementation "
+                + "is ALREADY IN THIS WORKSPACE — keep what works.\n"
+                + "These EXACT gold tests still FAIL; make them pass without breaking the rest:\n"
+                + ids + "\n" + evidence
+                + "INSTRUCTION: make the smallest correct change to turn these specific tests green. "
+                + "Do NOT edit tests. Re-run only the failing subset and iterate.\n"
+            )
+
+        # Expose the two contracts to the convergence seams (solve_module / repair_residual read
+        # repo_map['brief_builders'] when present, else fall back to their built-in briefs). This is
+        # the live wiring: the eval's richer issue text + scout plan flow into the module/residual
+        # briefs. The key is non-JSON (functions); build_author_prompt excludes it from the author
+        # repo-map dump.
+        brief_builders = {"module_solve": module_solve_brief, "residual_repair": residual_repair_brief}
+
         # --- 6) score_fn: reuse v1 evaluate_repo on the candidate WORKTREE ------
         # (NEVER reinvent the gate — this is the Cardinal contract source.)
         # Budget-aware per-eval timeout: cap one pytest scoring run so a single slow
@@ -394,6 +458,8 @@ def run_autogen_cell(
         # truth = the v1 constant; workers ALSO get it unconditionally via build_issue_description).
         # The orchestrator may restate/amplify it to subagents but can never remove it.
         repo_map["task_framing"] = TASK_FRAMING_BLOCK
+        # CONVERGENCE prompt contracts (live wiring): the seams pick these up via ctx.repo_map.
+        repo_map["brief_builders"] = brief_builders
 
         engine.log(f"autogen cell repo={repo} workers={[s.vendor for s in worker_specs]} "
                    f"author={author} scout_agents={scout_agents} ceiling={agent_ceiling}")
@@ -401,10 +467,11 @@ def run_autogen_cell(
         # --- run Mode C: scout fan-out (difficulty -> initial agents) -> author ->
         # ---            freeze -> sandbox exec -> verified select ----------------
         engine.phase(f"autogen:solve:{repo}")
-        # Test-driven repair depth ceiling (default 0 == OFF == flat best-of-N). Opt-in
-        # via env so the validated run-3 config stays the default; the validation run sets
-        # APEX_OMEGA_REPAIR_ITERS=2 to exercise repair lineages.
-        repair_iters = int(os.environ.get("APEX_OMEGA_REPAIR_ITERS", "0") or 0)
+        # Test-driven repair depth ceiling. Default is now 2 (ON): the orchestrator-level
+        # iterate-to-convergence loop is the dynamic-workflow signature move and is SAFE by
+        # default because the SPFG+ governor stops a true plateau (the run-4 budget-blowup
+        # fix). Set APEX_OMEGA_REPAIR_ITERS=0 to force the old flat best-of-N behaviour.
+        repair_iters = int(os.environ.get("APEX_OMEGA_REPAIR_ITERS", "2") or 2)
         # review-fix #13: content-bearing score drift keys (were documented but never set).
         from ..journal.key import sha256_hex
         expected_ids_sha = sha256_hex("\n".join(sorted(expected_ids))) if expected_ids else ""

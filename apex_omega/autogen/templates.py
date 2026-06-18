@@ -11,7 +11,12 @@ from __future__ import annotations
 # NOTE: attempt ids are assigned at thunk-CREATION (base + j), not at call time,
 # so journal keys are a pure function of the logical attempt index (deterministic
 # under concurrency -> faithful replay), never of thread-scheduling order.
-DEFAULT_ORCHESTRATION = '''
+
+# The CHEAP escalating best-of-N + test-driven repair path. This was the OLD default; it is
+# preserved verbatim as a named workflow because the convergence default falls THROUGH to it for
+# easy / single-module repos (the SKIP-DECOMPOSITION gate that prevents the 5-6x over-spawn cost
+# pathology on voluptuous/jinja), and ctx.workflow("default-best-of-n") still resolves to it.
+BEST_OF_N_ORCHESTRATION = '''
 def orchestrate(ctx):
     """Completion-first, fewest-agents-first verified best-of-N with TEST-DRIVEN
     REPAIR lineages and escalation.
@@ -43,6 +48,91 @@ def orchestrate(ctx):
             ctx.log("agent ceiling reached; stopping")
             break
     return ctx.select(candidates)  # may abstain (never fake a pass)
+'''
+
+
+# THE DEFAULT: the dynamic-workflow CONVERGENCE shape (guide §4 + §4.3) =
+#   DECOMPOSE -> FAN-OUT -> REDUCE -> LOOP-UNTIL-DRY -> VERIFY, with a progress-based stop.
+# Layered on the faithful per-agent codex-exec loop + the execution-authoritative accept gate +
+# the SPFG+ governor. The missing CONVERGENCE STRUCTURE the old flat best-of-N lacked: it sprayed
+# whole-repo rollouts and ABSTAINED on near-solves (babel 4598/4607, mimesis 6044/6052 thrown
+# away). This default CLOSES the off-by-K near-solve class by carrying the running best partial
+# diff forward into every fresh worktree and iterating on the EXACT residual failing node-ids on
+# the live merged tree.
+#
+# COST-SAFETY (load-bearing): decomposition OVER-SPAWN bites exactly the cost-pathology repos
+# (voluptuous/jinja). So the default GATES decomposition to medium/hard repos with >=2 modules;
+# easy / <=1-module repos SKIP decomposition and stay on the cheap escalating best-of-N+repair
+# path (preserving those wins, NO over-spawn). repair_iters=2 is SAFE only because the SPFG+
+# governor stops a TRUE plateau (no valid-measurement improvement + no frontier rise) while
+# letting a climbing frontier keep going (the run-4 budget-blowup fix); the loop terminates on
+# accept / K-dry / governor cut / budget. Acceptance stays engine-owned: ctx.select may ABSTAIN
+# (never fake a pass).
+DEFAULT_ORCHESTRATION = '''
+def orchestrate(ctx):
+    """Dynamic-workflow convergence: decompose -> fan-out per module -> reduce ->
+    loop-until-dry on the exact residual failing tests (carrying the best partial
+    diff forward) -> verify. Easy/single-module repos skip decomposition and fall
+    through to the cheap escalating best-of-N + repair path (no over-spawn)."""
+    ctx.phase("scope")
+    # (0) DECOMPOSE. SKIP-GATE: only decompose a medium/hard repo into >=2 INDEPENDENT modules.
+    # An easy / undecomposable / single-module repo stays on the cheap best-of-N path so the
+    # decomposition over-spawn never bites the cost-pathology repos (voluptuous/jinja).
+    difficulty = str((ctx.repo_map.get("difficulty") or "")).lower()
+    plan = None
+    if difficulty != "easy":
+        plan = ctx.decompose()
+    modules = (plan or {}).get("modules") or []
+    if not plan or len(modules) <= 1 or difficulty == "easy":
+        ctx.log("skip-decomposition (easy/<=1 module); falling through to best-of-N + repair")
+        return ctx.workflow("default-best-of-n")
+
+    # (1) FAN-OUT per module (no barrier), each agent seeded with the running carry diff.
+    ctx.phase("fanout")
+    carry = ctx.carry_best()
+    cands = ctx.fanout_modules(modules, carry_diff=carry)
+
+    # (2) REDUCE: merge the per-module diffs into ONE tree, run the FULL gold suite once.
+    ctx.phase("reduce")
+    red = ctx.reduce_residuals(cands, carry_diff=carry)
+    if red["accepted"]:
+        ctx.log("SOLVED after fan-out + reduce")
+        return red["candidate"]
+    if red["merged_diff"]:
+        carry = red["merged_diff"]          # carry the best merged partial forward
+    # a conflicting module is re-solved CLEAN against the last-known-good carry (never erased).
+    if red["conflicts"]:
+        for name in red["conflicts"]:
+            ctx.defer("merge_conflict", name, "module diff conflicted on the merge tree")
+
+    # (3) LOOP-UNTIL-DRY on the live merged tree vs the EXACT residual failing node-ids.
+    # Each round: one repair agent scoped to the residuals on the carry tree -> re-reduce ->
+    # if the frontier rose, carry the new merged partial forward. The SPFG+ governor stops a
+    # TRUE plateau (no progress) while letting a climbing frontier continue; dedup vs SEEN is
+    # automatic in ctx.parallel accounting.
+    ctx.phase("loop-until-dry")
+    residual = red["residual_failing_ids"]
+    rnd = 0
+    while ctx.should_continue_waves() and residual:
+        c = ctx.repair_residual(residual, carry_diff=carry, round=rnd)
+        rnd = rnd + 1
+        red = ctx.reduce_residuals([c], carry_diff=carry)
+        if red["accepted"]:
+            ctx.log("SOLVED in loop-until-dry round " + str(rnd))
+            return red["candidate"]
+        if red["merged_diff"]:
+            carry = red["merged_diff"]
+        residual = red["residual_failing_ids"]
+
+    # (4) VERIFY/HARDEN (medium/hard only): skeptics try to REFUTE the leader; a completeness
+    # critic flags gaps. These can only DOWNGRADE a cheat/incomplete pass, never promote one.
+    ctx.phase("verify")
+    winner = ctx.select(ctx.all_candidates())
+    if winner is not None and difficulty in ("medium", "hard"):
+        ctx.adversarial_verify(winner, n=3)
+        ctx.completeness_critic(winner)
+        winner = ctx.select(ctx.all_candidates())   # re-rank after any downgrade
+    return winner  # may abstain (never fake a pass)
 '''
 
 
@@ -137,4 +227,43 @@ def orchestrate(ctx):
         if w is not None:
             return w
     return ctx.select(candidates)
+'''
+
+
+# The DECOMPOSE-THEN-CONVERGE exemplar handed to the architect for medium/hard repos. It teaches
+# the convergence shape (the new DEFAULT) so an enabled author inherits it: decompose -> fan-out
+# per module (carry-seeded) -> reduce -> loop-until-dry on the EXACT residual ids carrying the
+# best partial forward -> harden. Easy/single-module repos compose the cheap best-of-N path.
+CONVERGE_EXEMPLAR = '''
+def orchestrate(ctx):
+    ctx.phase("scope")
+    # decompose ONLY a medium/hard repo into >=2 modules; otherwise compose the cheap best-of-N.
+    difficulty = str((ctx.repo_map.get("difficulty") or "")).lower()
+    plan = ctx.decompose() if difficulty != "easy" else None
+    modules = (plan or {}).get("modules") or []
+    if not plan or len(modules) <= 1 or difficulty == "easy":
+        return ctx.workflow("default-best-of-n")
+    carry = ctx.carry_best()
+    cands = ctx.fanout_modules(modules, carry_diff=carry)         # per-module fan-out (no barrier)
+    red = ctx.reduce_residuals(cands, carry_diff=carry)          # merge + full-suite score once
+    if red["accepted"]:
+        return red["candidate"]
+    if red["merged_diff"]:
+        carry = red["merged_diff"]
+    residual = red["residual_failing_ids"]
+    rnd = 0
+    while ctx.should_continue_waves() and residual:              # loop-until-dry on the live tree
+        c = ctx.repair_residual(residual, carry_diff=carry, round=rnd)
+        rnd = rnd + 1
+        red = ctx.reduce_residuals([c], carry_diff=carry)
+        if red["accepted"]:
+            return red["candidate"]
+        if red["merged_diff"]:
+            carry = red["merged_diff"]
+        residual = red["residual_failing_ids"]
+    winner = ctx.select(ctx.all_candidates())
+    if winner is not None and difficulty in ("medium", "hard"):
+        ctx.adversarial_verify(winner, n=3)
+        winner = ctx.select(ctx.all_candidates())
+    return winner
 '''

@@ -151,6 +151,30 @@ ARMS = [
                                   "--autogen-max-agents", _OMEGA_MAX]),
     ("omega_autogen_unbounded",  ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "3",
                                   "--autogen-author", "--autogen-max-agents", _OMEGA_MAX]),
+    # ===== CONVERGENCE-REBUILD A/B (Phase 3; offline-validated, live run is user-driven) =====
+    # Arm A = the EXISTING flat best-of-N default + the Phase-1 flag flips (repair_iters=2,
+    # repair excerpts on). Arm B = the REBUILT convergence default (decompose -> fan-out ->
+    # reduce -> loop-until-dry on the exact residuals, carrying the best partial forward) via
+    # APEX_OMEGA_ORCHESTRATION=converge. Both run the SAME flips so the ONLY variable is the
+    # orchestration shape.
+    #
+    # PROMOTION CRITERIA — promote Arm B over Arm A ONLY if it:
+    #   (1) CONVERTS the babel/mimesis near-solves (4598/4607, 6044/6052) to real SOLVES (the
+    #       off-by-K class the carry-forward + residual loop targets);
+    #   (2) does NOT regress voluptuous/jinja solve-rate OR cost — no 5-6x agent over-spawn
+    #       (the decomposition skip-gate keeps easy/<=1-module repos on the cheap path);
+    #   (3) stays within the wall-clock budget (run-4 budget blowup must NOT recur — safe only
+    #       because the SPFG+ governor stops a true plateau while letting a climbing frontier go).
+    # Suggested live A/B:
+    #   LADDER_ARMS=omega_flips_unbounded,omega_converge_unbounded \
+    #   LADDER_REPOS=voluptuous,jinja,mimesis,babel LADDER_SEEDS=3 python scripts/run_ladder.py
+    ("omega_flips_unbounded",    ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                                  "--autogen-max-agents", _OMEGA_MAX],
+                                 {"APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    ("omega_converge_unbounded", ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                                  "--autogen-max-agents", _OMEGA_MAX],
+                                 {"APEX_OMEGA_ORCHESTRATION": "converge",
+                                  "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
 ]
 # Default 4-repo comparison set. LADDER_REPOS (comma-separated commit0 target names) overrides it
 # for a custom sweep (e.g. a 12-15 repo breadth run); see apex_omega/eval/registry TARGET_NAMES.

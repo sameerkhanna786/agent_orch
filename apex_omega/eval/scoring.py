@@ -85,8 +85,31 @@ def verification_from_commit0_evaluation(evaluation: Any) -> VerificationResult:
     # infra_nonresult (re-run on resume) instead of caching a transient as a real failure.
     _status = str(getattr(evaluation, "evaluation_status", "") or "").lower()
     _tax = str(getattr(evaluation, "verification_taxonomy", "") or "").lower()
+    # P0 harness fix (defense in depth): a pytest plugin-abort (rc=4 usage error
+    # before collection), a collection error, or a native interpreter crash
+    # (segfault/abort/signal: rc<0 or 134-139) is an ENVIRONMENT failure, never a
+    # genuine 0. The upstream runner already classifies these as harness_failure /
+    # parser_error (-> evaluation_status "audit_inconclusive"), but we also gate on
+    # the raw diagnostics + returncode here so a crashed interpreter can never flow
+    # into the SPFG+ frontier as a real residual. KEEP the all-gold-ids accept gate:
+    # only indeterminate is neutralized; a real partial stays a real residual.
+    _diag = getattr(evaluation, "diagnostics", None) or {}
+    _diag_indet = bool(
+        (isinstance(_diag, dict) and (
+            _diag.get("harness_failure")
+            or _diag.get("parser_error")
+            or _diag.get("native_crash_returncode") is not None))
+    )
+    _rc = getattr(evaluation, "returncode", 0)
+    try:
+        _rc = int(_rc)
+    except (TypeError, ValueError):
+        _rc = 0
+    _native_crash = _rc < 0 or _rc in (134, 137, 138, 139)
     indeterminate = ("inconclusive" in _status
-                     or any(k in _tax for k in ("harness_failure", "parser_error", "environment_failure")))
+                     or any(k in _tax for k in ("harness_failure", "parser_error", "environment_failure"))
+                     or _diag_indet
+                     or _native_crash)
     if indeterminate:
         accepted = False
     # GOLD-SCORING GUARD (belt-and-suspenders): under the REQUIRED gold contract the gold path

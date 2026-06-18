@@ -14,14 +14,21 @@ from typing import Any
 
 from .templates import (
     AUDIT_ORCHESTRATION,
+    BEST_OF_N_ORCHESTRATION,
     DECOMPOSE_EXEMPLAR,
     DEFAULT_ORCHESTRATION,
     RALPH_ORCHESTRATION,
 )
 
 # Built-in, name-addressable workflows. Each value is a frozen ``orchestrate(ctx)`` source.
+#
+# ``default-best-of-n`` resolves to the CHEAP escalating best-of-N + repair path (the old
+# default) — NOT the new convergence default — because the convergence default falls THROUGH to
+# it for easy/single-module repos via ctx.workflow("default-best-of-n"). ``converge`` is the new
+# decompose->fan-out->reduce->loop-until-dry default (DEFAULT_ORCHESTRATION).
 BUILTIN_WORKFLOWS: dict[str, str] = {
-    "default-best-of-n": DEFAULT_ORCHESTRATION,
+    "default-best-of-n": BEST_OF_N_ORCHESTRATION,
+    "converge": DEFAULT_ORCHESTRATION,
     "decompose": DECOMPOSE_EXEMPLAR,
     "ralph": RALPH_ORCHESTRATION,
     "audit": AUDIT_ORCHESTRATION,

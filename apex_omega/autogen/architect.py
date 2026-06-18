@@ -26,7 +26,13 @@ from ..journal.key import sha256_hex
 from ..types import ScopedTask
 from .context import OrchestrationContext
 from .sandbox import extract_code, lint_source, run_orchestration
-from .templates import DECOMPOSE_EXEMPLAR, DEFAULT_ORCHESTRATION, RALPH_ORCHESTRATION
+from .templates import (
+    BEST_OF_N_ORCHESTRATION,
+    CONVERGE_EXEMPLAR,
+    DECOMPOSE_EXEMPLAR,
+    DEFAULT_ORCHESTRATION,
+    RALPH_ORCHESTRATION,
+)
 
 
 API_REFERENCE = """\
@@ -60,7 +66,26 @@ NO dunder access. The runtime injects everything you need via `ctx`:
 
   ctx.solve_attempt(..., phase=?, label=?)        # phase/label group+name this agent in the UI (per-agent opts)
   ctx.workflow(name_or_ref, args=?)               # compose another orchestration inline (one level deep);
-                                              #   names: "default-best-of-n" | "decompose" | "audit" | "ralph"
+                                              #   names: "default-best-of-n" | "converge" | "decompose" | "audit" | "ralph"
+
+DECOMPOSE -> CONVERGE (the powerful default shape for medium/hard MODULAR repos — decompose the
+work, solve per module in parallel, then ITERATE to convergence on the exact residual failures
+instead of abstaining on a near-solve). Each seam is journaled and can NEVER set acceptance:
+  ctx.decompose(vendor=?, model=?) -> {"modules":[{"module","gold_test_ids","depends_on"}],"order":[...]} | None
+                                              #   ONE read-only scoping agent returns a module breakdown.
+                                              #   Returns None on an undecomposable repo -> fall back to best-of-N.
+  ctx.carry_best() -> str                         # the running BEST partial diff (highest valid gold-pass count)
+  ctx.fanout_modules(modules, carry_diff=?) -> [Candidate]
+                                              #   per-module solve fan-out (ctx.pipeline, no barrier); each agent
+                                              #   is seeded with carry_diff and scoped to its module's gold ids.
+  ctx.solve_module(module, carry_diff=?) -> Candidate|None   # ONE module-scoped solve (carry applied pre-agent)
+  ctx.reduce_residuals(cands, carry_diff=?) -> {"merged_diff","residual_failing_ids","accepted","candidate","conflicts","indeterminate"}
+                                              #   PLAIN-py merge of per-module diffs into one tree + ONE full-suite
+                                              #   score (zero tokens). A conflicting module is recorded in
+                                              #   conflicts[] and re-solved clean — progress is NEVER erased.
+  ctx.repair_residual(residual_ids, carry_diff=?, round=?) -> Candidate|None
+                                              #   ONE repair agent on the LIVE merged tree, scoped to the EXACT
+                                              #   still-failing node-ids (carry applied pre-agent so it edits live).
 
 READ-ONLY SIGNALS (steer compute; they can NEVER create a Candidate or accept anything):
   ctx.ask(prompt, schema=?, vendor=?, model=?, agent_id=?, max_nudges=2, strict=False, phase=?, label=?)
@@ -214,15 +239,30 @@ def build_author_prompt(repo_map: dict) -> str:
     framing = str(repo_map.get("task_framing") or "").strip()
     framing_block = ("\n\nTASK FRAMING (binding eval rules — your workers ALSO receive these "
                      "independently; you may restate/amplify but never remove them):\n" + framing) if framing else ""
-    rmap = {k: v for k, v in repo_map.items() if k not in ("design_contract", "task_framing")}
+    rmap = {k: v for k, v in repo_map.items()
+            if k not in ("design_contract", "task_framing", "brief_builders")}
+    # The PRIMARY exemplar is difficulty-gated: medium/hard MODULAR repos get the decompose->
+    # converge shape (decompose -> fan-out -> reduce -> loop-until-dry on residuals), which closes
+    # the off-by-K near-solve class; easy repos get the cheap best-of-N (decomposition over-spawn
+    # is the cost pathology on easy repos, so we do NOT push it there).
+    difficulty = str(repo_map.get("difficulty") or "").lower()
+    if difficulty in ("medium", "hard"):
+        primary_label = ("PRIMARY EXEMPLAR (decompose -> fan-out per module -> reduce -> "
+                         "loop-until-dry on the EXACT residual failing tests, carrying the best "
+                         "partial forward — the convergence shape; easy/single-module repos should "
+                         "compose ctx.workflow(\"default-best-of-n\") instead)")
+        primary_src = CONVERGE_EXEMPLAR.strip()
+    else:
+        primary_label = ("REFERENCE EXEMPLAR (a safe completion-first best-of-N you can adapt or "
+                         "improve on — e.g. decompose by module, pipeline stages, route hard work "
+                         "to a stronger vendor)")
+        primary_src = BEST_OF_N_ORCHESTRATION.strip()
     return (
         "Write a Python function `orchestrate(ctx)` tailored to THIS repository to "
         "solve its task with the fewest agents necessary, escalating until a verified "
         "pass.\n\n" + API_REFERENCE + "\n" + INVARIANTS + _PIPELINE_VS_PARALLEL_RULE + framing_block +
         "\nDISCOVERED REPOSITORY MAP:\n" + json.dumps(rmap, indent=2)[:6000] +
-        "\n\nREFERENCE EXEMPLAR (a safe completion-first best-of-N you can adapt or "
-        "improve on — e.g. decompose by module, pipeline stages, route hard work to a "
-        "stronger vendor):\n```python\n" + DEFAULT_ORCHESTRATION.strip() +
+        "\n\n" + primary_label + ":\n```python\n" + primary_src +
         "\n```\n\nQUALITY-PATTERN EXEMPLAR (escalate -> synthesize -> adversarially verify; "
         "adapt the patterns to the repo's difficulty — they cost more agents, so reserve "
         "verification/synthesis for harder tasks):\n```python\n" + PATTERN_EXEMPLAR.strip() +
@@ -268,9 +308,18 @@ def author_orchestration(
 
     # RALPH-WIGGUM baseline: freeze the fixed ralph workflow DIRECTLY (no scout, no author),
     # so it resumes deterministically like every other arm. A first-class control arm.
-    if os.environ.get("APEX_OMEGA_ORCHESTRATION") == "ralph":
+    _orch_selector = os.environ.get("APEX_OMEGA_ORCHESTRATION")
+    if _orch_selector == "ralph":
         lint = lint_source(RALPH_ORCHESTRATION)
         return _freeze(engine, RALPH_ORCHESTRATION, "ralph", lint.ok, lint.violations)
+
+    # CONVERGE arm (Phase 3 A/B): freeze the convergence default DIRECTLY (no author), so the
+    # rebuilt decompose->fan-out->reduce->loop-until-dry orchestration is the frozen plan even
+    # when author=True. DEFAULT_ORCHESTRATION already IS the convergence shape; this selector
+    # pins it explicitly so Arm B is reproducible and resumes deterministically.
+    if _orch_selector in ("converge", "rebuild"):
+        lint = lint_source(DEFAULT_ORCHESTRATION)
+        return _freeze(engine, DEFAULT_ORCHESTRATION, "converge", lint.ok, lint.violations)
 
     if not author:
         lint = lint_source(DEFAULT_ORCHESTRATION)
@@ -519,12 +568,14 @@ def autosolve(
             engine.log(f"floor-probe failed: {type(exc).__name__}: {exc}")
 
     def _floor():
-        # The floor runs the verified best-of-N template DIRECTLY — it must NOT go
+        # The floor runs the CHEAP verified best-of-N template DIRECTLY — it must NOT go
         # through author_orchestration (which would resume the just-frozen, failing
-        # authored script and re-crash). This is what guarantees completion-first.
-        fw = FrozenWorkflow(DEFAULT_ORCHESTRATION, sha256_hex(DEFAULT_ORCHESTRATION),
+        # authored script and re-crash), and it must NOT be the convergence default (which
+        # may decompose/fan-out — over-spawn risk on a fall-open). The cheap escalating
+        # best-of-N + repair path is the guaranteed completion-first floor.
+        fw = FrozenWorkflow(BEST_OF_N_ORCHESTRATION, sha256_hex(BEST_OF_N_ORCHESTRATION),
                             "fallback", True, [])
-        return run_orchestration(DEFAULT_ORCHESTRATION, ctx), fw
+        return run_orchestration(BEST_OF_N_ORCHESTRATION, ctx), fw
 
     try:
         winner = run_orchestration(frozen.source, ctx)

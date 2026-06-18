@@ -4506,6 +4506,26 @@ def _commit0_can_normalize_benign_extra_returncode(
     return bool(extra_diagnostics.get("all_failures_benign"))
 
 
+# P0 harness fix: a native interpreter crash (segfault / abort / OOM-kill / signal)
+# is an ENVIRONMENT failure, never a real test outcome. On POSIX a signal-killed
+# subprocess surfaces either as a negative returncode (``-signal``) or, when a shell
+# wrapper reports it, as ``128 + signal``. The signals below cover SIGABRT(6→134),
+# SIGKILL(9→137), SIGPIPE(13→138) and SIGSEGV(11→139) — the crashes that make pytest
+# exit WITHOUT a JSON report. Classifying these as harness_failure (→ indeterminate)
+# prevents a crashed interpreter from being scored as a genuine 0 (run-4 false-zero class).
+_COMMIT0_NATIVE_CRASH_RETURNCODES = frozenset({134, 137, 138, 139})
+
+
+def _commit0_returncode_is_native_crash(returncode: int) -> bool:
+    try:
+        rc = int(returncode)
+    except (TypeError, ValueError):
+        return False
+    # rc<0 == killed by signal -rc (Python subprocess convention);
+    # 134-139 == 128 + fatal-signal (shell convention).
+    return rc < 0 or rc in _COMMIT0_NATIVE_CRASH_RETURNCODES
+
+
 def _pytest_output_indicates_collection_failure_before_report(output: str) -> bool:
     normalized = normalize_terminal_output(output).lower()
     if "unrecognized arguments" in normalized and "--json-report" in normalized:
@@ -14535,6 +14555,35 @@ print("APEX_COMMIT0_SOLVE_NETWORK_BOUNDARY_OK")
             }
 
         if not report_path.exists():
+            if _commit0_returncode_is_native_crash(shell_rc):
+                # P0 harness fix: a native interpreter crash (segfault/abort/signal)
+                # with NO json report is an environment failure, not a real outcome.
+                # Classify it as harness_failure -> INDETERMINATE (excluded) so a
+                # crashed interpreter is never scored as a genuine 0. This MUST run
+                # before the collection-failure-before-report branch: a crash can
+                # truncate output so it coincidentally matches a collection marker,
+                # which would otherwise be mis-scored as errors==total (a false zero).
+                evaluation.evaluation_backend = COMMIT0_EVALUATION_BACKEND_LOCAL_PYTEST
+                evaluation.passed = 0
+                evaluation.failed = 0
+                evaluation.errors = 0
+                evaluation.skipped = 0
+                evaluation.diagnostics["harness_failure"] = True
+                evaluation.diagnostics["native_crash_returncode"] = int(shell_rc)
+                evaluation.diagnostics["pytest_json_report_missing_reason"] = (
+                    "native_interpreter_crash"
+                )
+                evaluation.diagnostics["scored_signal_count"] = 0
+                if expected_test_ids:
+                    evaluation.expected_test_coverage = {
+                        "expected_test_count": evaluation.total_tests,
+                        "matched_expected_test_count": 0,
+                        "missing_expected_test_count": evaluation.total_tests,
+                        "coverage_preserved": False,
+                        "scoring_universe_unobserved": True,
+                    }
+                _commit0_evaluation_decision(evaluation)
+                return evaluation
             if expected_test_ids and _pytest_output_indicates_collection_failure_before_report(
                 evaluation.output
             ):

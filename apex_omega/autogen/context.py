@@ -33,6 +33,32 @@ from ..types import ScopedTask
 # hallucinations — the whole reason best-of-N works).
 DEFAULT_STRATEGIES = ("minimal", "comprehensive", "test_driven", "edge_case_hardening")
 
+# DECOMPOSE_SCHEMA — the read-only schema'd reply contract for ctx.decompose(): a module
+# breakdown of the repo (module name -> the gold test ids that module must turn green +
+# topological deps), plus an explicit topological ``order``. This is a SIGNAL the convergence
+# default uses to fan out per-module solve agents; the number of modules becomes the PRIMARY
+# difficulty signal (file-count stays the floor). A schema-miss / undecomposable repo returns
+# None (ctx.ask null terminal) -> the caller falls back to flat best-of-N.
+DECOMPOSE_SCHEMA = {
+    "type": "object",
+    "required": ["modules"],
+    "properties": {
+        "modules": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["module", "gold_test_ids"],
+                "properties": {
+                    "module": {"type": "string"},
+                    "gold_test_ids": {"type": "array", "items": {"type": "string"}},
+                    "depends_on": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        "order": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
 # SANDBOX-NOT-PROMPT POLICY (user directive 2026-06-16): we do NOT limit the model via
 # prompts and we do NOT penalize/kill an attempt for trying to fetch/cheat. The CORRECTNESS
 # BOUNDARY is structural — the worktree's source SHADOWS any site-packages install (cwd for
@@ -92,6 +118,17 @@ def _materialize_cached_diff(wt: str, diff: str) -> None:
         raise RuntimeError(f"cached diff failed to re-apply on resume in {wt}")
 
 
+class _MergeRes:
+    """A minimal stand-in for an ExecResult so reduce_residuals can reuse the journaled
+    _scored() path (which keys the cache on ``res.fs_diff``). The merge is a plain-Python
+    apply-and-score with no agent, so the merged diff IS the artifact and the cache key."""
+
+    __slots__ = ("fs_diff",)
+
+    def __init__(self, merged_diff: str):
+        self.fs_diff = merged_diff or ""
+
+
 class OrchestrationContext:
     def __init__(
         self,
@@ -111,7 +148,7 @@ class OrchestrationContext:
         sandbox: str = "workspace-write",
         timeout_seconds: Optional[int] = None,
         strategies: Sequence[str] = DEFAULT_STRATEGIES,
-        repair_iters: int = 0,
+        repair_iters: int = 2,
         args: Any = None,
         node_ns: str = "",
         nesting_depth: int = 0,
@@ -140,10 +177,14 @@ class OrchestrationContext:
         _diff = str((self.repo_map or {}).get("difficulty") or "").lower()
         _pa = {"easy": 1800, "medium": 2400, "hard": 3000}.get(_diff, 2400)
         self.per_agent_timeout_seconds = None if timeout_seconds is None else min(_pa, int(timeout_seconds))
-        # HARD CEILING on test-driven repair depth (default 0 == OFF == flat best-of-N).
-        # Clamps every solve_and_repair/make_repairing_attempt call, so repair is opt-in
-        # regardless of what an authored orchestrator requests. run-4 showed repair-ON by
-        # default blew the time budget; it is now off unless explicitly enabled.
+        # HARD CEILING on test-driven repair depth. Clamps every solve_and_repair/
+        # make_repairing_attempt call, so an authored orchestrator can never EXCEED the
+        # configured repair budget. Default is now 2 (ON): the run-4 budget blowup is no
+        # longer a risk because the SPFG+ governor (engine/frontier.py + governor.py) stops
+        # a TRUE plateau (no valid-measurement improvement + no frontier rise within the
+        # patience windows) while letting a climbing frontier keep going — so repair only
+        # spends budget while it is actually closing the gap. Set repair_iters=0 to force
+        # the old flat best-of-N behaviour.
         self.repair_iters = max(0, int(repair_iters))
         # Backbone 1.1: optional drift keys for the journaled SCORE step (set by the eval
         # harness; "" = unused). The score is keyed on the diff content + repo snapshot so
@@ -326,6 +367,18 @@ class OrchestrationContext:
             exc = CutLosses if self._halt_is_cut else PlateauStop
             raise exc(self._halt_reason or "plateau: no progress")
         out = self._engine.parallel(list(thunks))
+        self._observe(out)
+        self._wave_verdict(self._wave_state())   # sets self._halted on a halt verdict
+        return out
+
+    def _observe(self, out: Sequence[Any]) -> None:
+        """Fold a batch of returned candidates into the SPFG+ frontier + cut-losses accounting
+        (frontier rise / valid-measurement + journaled-wall / nonresult + sterile streaks). This
+        is the SAME accounting ctx.parallel runs, factored out so the convergence REDUCE step
+        (reduce_residuals' merged full-suite candidate) can feed the frontier too — a climbing
+        frontier (more residual ids green) resets BOTH patience arms, while a conflict/indeterminate
+        reduce is NEUTRAL (feeds only the harness-stall streak). It does NOT call the wave verdict
+        (the caller decides when to take a halt decision)."""
         # --- CUT-LOSSES accounting over the returned candidates (FRESH or CACHED, so the
         # detector state is faithfully reconstructed during a resume replay) ---
         round_gold = self._best_gold_passed
@@ -413,8 +466,6 @@ class OrchestrationContext:
             self._sterile_streak = 0
         else:
             self._sterile_streak += max(1, n_sterile)
-        self._wave_verdict(self._wave_state())   # sets self._halted on a halt verdict
-        return out
 
     def _wave_state(self) -> dict:
         """The cut-losses detector inputs at the current wave boundary. All cut signals are in
@@ -624,7 +675,8 @@ class OrchestrationContext:
                  strategy: str, vendor: Optional[str], model: Optional[str],
                  scoped_extra: Optional[dict] = None, meta_extra: Optional[dict] = None,
                  checkpoint: bool = True, agent_type: str = "",
-                 phase: Optional[str] = None, label: Optional[str] = None) -> Optional[Candidate]:
+                 phase: Optional[str] = None, label: Optional[str] = None,
+                 pre_apply_diff: str = "") -> Optional[Candidate]:
         """The SHARED body of every scored attempt (Backbone 2.2 extraction). Acquire a
         fresh worktree, run ONE journaled coding agent, materialize its diff, score it by
         execution, build a ranked Candidate, bank it, and (if accepted) checkpoint. This
@@ -635,7 +687,16 @@ class OrchestrationContext:
         ``node_prefix`` is the journal node-id prefix. Returns a Candidate, or None on infra
         failure. The attempt runs with internet OFF (iron-tight) and NO anti-fetch prompt:
         cheating is prevented STRUCTURALLY (worktree shadows site-packages + no network), not by
-        limiting the model; a blocked escape is recorded as telemetry, never penalized."""
+        limiting the model; a blocked escape is recorded as telemetry, never penalized.
+
+        CARRY-FORWARD (``pre_apply_diff``): the running best partial diff is applied into the
+        fresh worktree BEFORE the agent runs, so a module/repair agent EDITS the accumulated
+        work instead of re-implementing from scratch (closes the babel/mimesis off-by-K class).
+        The fresh path otherwise pre-applies NOTHING (the resume-HIT ``materialize`` callback only
+        re-applies a journaled cached diff). A carry that FAILS to apply (3-way conflict) is the
+        load-bearing conflict signal: we return an INDETERMINATE Candidate (meta carry_conflict=
+        True, empty diff) — NOT None — so the loop distinguishes a carry-conflict (re-solve the
+        module clean, NEVER erase the carry) from an infra non-result, and the prior carry is kept."""
         spec = None
         if vendor is not None:
             spec = next((s for s in self._worker_specs if s.vendor == vendor), None)
@@ -648,6 +709,30 @@ class OrchestrationContext:
             return None
         try:
             wt = handle.path
+            # CARRY-FORWARD seed: apply the running best partial diff BEFORE the agent edits.
+            # apply_diff (worktree.py) tries strict then --3way and returns False on BOTH —
+            # that False is the SOLE conflict signal. A failed carry is NEVER silently dropped
+            # and NEVER no-op'd: it yields an INDETERMINATE Candidate so the caller re-solves
+            # the module clean against the last-known-good carry (load-bearing; review-fix #12
+            # mirror — but here we return an indeterminate Candidate instead of raising, because
+            # the convergence loop must keep the carry rather than abort the whole cell).
+            if pre_apply_diff and not apply_diff(wt, pre_apply_diff):
+                self.log(f"attempt {prefix}{aid}: carry-forward diff conflicted (indeterminate; re-solve clean)")
+                vr_c = VerificationResult(accepted=False, score=0.0, indeterminate=True,
+                                          reason="carry_conflict")
+                meta_c = {"vendor": spec.vendor, "model": model or spec.model, "strategy": strategy,
+                          "finalization_status": "infra_nonresult", "ok": False,
+                          "pass_rate": 0.0, "indeterminate": True, "gold_passed": 0, "gold_total": 0,
+                          "errors": 0, "empty_diff": True, "failing_nodeids": [],
+                          "failure_excerpts": "", "carry_conflict": True}
+                if meta_extra:
+                    meta_c.update(meta_extra)
+                    meta_c["carry_conflict"] = True   # never let meta_extra clobber the signal
+                cand_c = candidate_from_verification(
+                    candidate_id=f"{self._node_ns}{prefix}{aid}", diff="", vr=vr_c,
+                    rollout_id=aid, cluster_id=aid, meta=meta_c)
+                self._all_candidates.append(cand_c)
+                return cand_c
             session = self._executor.spawn(wt, spec.vendor, model or spec.model, spec=getattr(spec, "extra", {}))
             scoped = {"repo_snapshot_sha": self._provider.base_commit, "attempt": aid, "strategy": strategy}
             if scoped_extra:
@@ -851,13 +936,15 @@ class OrchestrationContext:
         excerpts = pmeta.get("failure_excerpts") or ""
         pdiff = (parent.diff or "")[:self._repair_diff_limit]
         base_prompt = self._prompt_builder(self, aid, strategy)
-        # Phase 3 (redact): by DEFAULT the raw pytest failure tail is DROPPED — it can carry
-        # asserted-equal RHS answer values. The sanitized failing node ids below are the
-        # Reflexion signal. With APEX_OMEGA_REPAIR_EXCERPTS=1 the tail is included but ONLY
-        # after redact_excerpts() reduces it to sanitized node ids (review-fix #6: it used to
-        # be injected raw, defeating the firewall the redactor exists to enforce).
+        # Phase 3 (redact): the pytest failure tail is the Reflexion signal that lets the
+        # repair agent target the real failures. It is now included by DEFAULT (the
+        # convergence loop needs it), but ONLY after redact_excerpts() reduces it to
+        # sanitized failing node ids (review-fix #6: it used to be injected raw, defeating
+        # the firewall the redactor exists to enforce). Set APEX_OMEGA_REPAIR_EXCERPTS=0 to
+        # drop the tail entirely. Un-redacted excerpts are a separate, narrowly-scoped
+        # convergence-residual brief decision (not this general repair path).
         excerpt_block = ""
-        if excerpts and os.environ.get("APEX_OMEGA_REPAIR_EXCERPTS") == "1":
+        if excerpts and os.environ.get("APEX_OMEGA_REPAIR_EXCERPTS", "1") != "0":
             try:
                 from ..eval.design_contract import redact_excerpts
                 safe = redact_excerpts(excerpts, arity_by_base=None,
@@ -945,6 +1032,287 @@ class OrchestrationContext:
         """Thunk for a repair LINEAGE (base attempt + up to ``max_iters`` test-driven
         repairs), ready to hand to ``parallel`` exactly like ``make_attempt``."""
         return lambda: self.solve_and_repair(attempt_id=i, max_iters=max_iters)
+
+    # ---- CONVERGENCE STRUCTURE (Phase 2): decompose -> fan-out -> reduce -> loop-until-dry ----
+    # The four seams below add the missing CONVERGENCE STRUCTURE to the default orchestration.
+    # All are journaled/replay-safe (they reuse _attempt / ask / _provider / apply_diff), and
+    # NONE can set ``accepted`` — acceptance stays engine-owned and execution-grounded.
+
+    def carry_best(self) -> str:
+        """The running best PARTIAL diff to carry forward into the next wave: the diff of the
+        VALID (non-indeterminate) candidate with the highest gold-pass count (raw pass_rate as
+        the secondary tie-break). Monotone — mirrors the _best_gold_passed frontier (context.py
+        parallel accounting) so a fresh worktree is always seeded with the strongest accumulated
+        work, closing the off-by-K near-solve discard. Empty string when nothing usable yet."""
+        best = None
+        best_key = (-1, -1.0)
+        for c in self.all_candidates():
+            m = getattr(c, "meta", {}) or {}
+            if m.get("indeterminate") or m.get("carry_conflict"):
+                continue
+            if not (c.diff or "").strip():
+                continue
+            key = (int(m.get("gold_passed", 0) or 0), float(c.public_signal_score or 0.0))
+            if key > best_key:
+                best_key = key
+                best = c
+        return (best.diff or "") if best is not None else ""
+
+    def decompose(self, *, vendor: Optional[str] = None, model: Optional[str] = None,
+                  agent_id: int = 700100) -> Optional[dict]:
+        """Read-only, schema-validated repo DECOMPOSITION (the convergence default's wave 0).
+
+        Runs ONE read-only ctx.ask (sandbox=read-only, effort=high, FIXED agent_id 700100 so it
+        is replay-deterministic and disjoint from base/repair/pattern id namespaces) that returns
+        a module breakdown: ``{"modules":[{"module","gold_test_ids","depends_on"}],"order":[...]}``.
+        The number of modules becomes the PRIMARY difficulty signal (file-count stays the floor).
+
+        FAIL-OPEN: on a schema-miss / undecomposable repo ctx.ask returns None -> we fall back to
+        repo_map['modules'] (the build_repo_map top-level package names) wrapped as a degenerate
+        single-module plan, or None when there is nothing — the caller then stays on best-of-N.
+        Stores the chosen plan on ``self.repo_map['decomposition']`` for telemetry/replay."""
+        modules = list((self.repo_map or {}).get("modules") or [])
+        approach = str((self.repo_map or {}).get("approach") or "")[:1500]
+        prompt = (
+            "You are SCOPING a Python repository for a parallel implementation effort. Do NOT "
+            "write any code. Read the source tree and the test suite and decompose the work into "
+            "INDEPENDENT modules, each owning a disjoint slice of the failing/empty implementation.\n"
+            "For each module return: `module` (the top-level package/sub-package or file group it "
+            "implements), `gold_test_ids` (the exact pytest node-ids that module must turn green), "
+            "and `depends_on` (other module names it must be implemented after). Also return "
+            "`order`: a topological ordering of the module names.\n"
+            + (f"Known top-level packages (a hint, not exhaustive): {modules[:50]}\n" if modules else "")
+            + (f"\nScout notes:\n{approach}\n" if approach else "")
+            + "\nReturn ONLY the JSON object matching the required schema."
+        )
+        plan = self.ask(prompt, schema=DECOMPOSE_SCHEMA, vendor=vendor, model=model,
+                        agent_id=agent_id, max_nudges=2, phase="decompose", label="scope",
+                        agent_type="decompose")
+        if isinstance(plan, dict) and plan.get("modules"):
+            mods = [m for m in plan["modules"] if isinstance(m, dict) and m.get("module")]
+            if mods:
+                order = [str(o) for o in (plan.get("order") or [])] or [str(m["module"]) for m in mods]
+                chosen = {"modules": mods, "order": order}
+                self.repo_map["decomposition"] = chosen
+                return chosen
+        # fail-open: degenerate plan from repo_map['modules'] (no gold subset -> caller will treat
+        # <=1 module as "skip decomposition"); None when there is truly nothing to decompose.
+        if modules:
+            chosen = {"modules": [{"module": str(m), "gold_test_ids": [], "depends_on": []}
+                                  for m in modules],
+                      "order": [str(m) for m in modules]}
+            self.repo_map["decomposition"] = chosen
+            return chosen
+        return None
+
+    def solve_module(self, module: dict, *, carry_diff: str = "", attempt_id: Optional[int] = None,
+                     vendor: Optional[str] = None, model: Optional[str] = None,
+                     strategy: str = "module", prompt: Optional[str] = None) -> Optional[Candidate]:
+        """Run ONE module-scoped solve agent, seeded with the carry-forward diff applied into the
+        fresh worktree BEFORE the agent edits. The agent is briefed to implement ONLY this module
+        and make its gold-test subset pass; it is still scored on the FULL gold suite (the accept
+        gate is unchanged). Returns a Candidate (or an INDETERMINATE carry-conflict Candidate, or
+        None on infra failure)."""
+        name = str((module or {}).get("module") or "module")
+        gold_ids = list((module or {}).get("gold_test_ids") or [])
+        aid = self._next_attempt_id() if attempt_id is None else _as_int_id(attempt_id)
+        if prompt is None:
+            # Prefer the eval-provided CONTRACT 1 builder (richer issue text + scout plan) when the
+            # harness wired one onto repo_map; else fall back to the built-in module-scoped brief.
+            _bb = (self.repo_map or {}).get("brief_builders") or {}
+            _mk = _bb.get("module_solve")
+            if callable(_mk):
+                try:
+                    prompt = _mk(self, name, gold_ids, carry_nonempty=bool((carry_diff or "").strip()))
+                except Exception as exc:
+                    self.log(f"solve_module: module_solve brief builder failed ({exc}); using default")
+        if prompt is None:
+            base = self._prompt_builder(self, aid, strategy)
+            carry_note = ("\nFiles partially implemented by earlier agents are PRESENT in this "
+                          "workspace — build ON them, do not revert.\n" if (carry_diff or "").strip() else "")
+            ids_block = ("\n".join(map(str, gold_ids[:60])) if gold_ids else "(infer from the module's tests)")
+            prompt = (
+                base
+                + "\n\n--- MODULE-SCOPED SOLVE ---\n"
+                + f"Implement ONLY the module `{name}`. Make EXACTLY these gold tests pass — other "
+                + "modules are handled by parallel agents, so do NOT reimplement the whole repo:\n"
+                + ids_block + "\n"
+                + "Boundaries: edit only files belonging to this module; do NOT edit/add/delete any "
+                + "test file; do not touch other modules (note any genuinely-missing shared symbol "
+                + "for the reducer instead of forking it).\n"
+                + carry_note
+                + "Run the scoped subset and iterate until that subset is green.\n"
+            )
+        return self._attempt(
+            aid=aid, prefix="m", node_prefix="module", prompt=prompt, strategy=strategy,
+            vendor=vendor, model=model, pre_apply_diff=carry_diff,
+            scoped_extra={"module": name, "gold_ids": list(gold_ids[:60])},
+            meta_extra={"module": name},
+        )
+
+    def fanout_modules(self, modules: Sequence[dict], *, carry_diff: str = "",
+                       id_base: int = 730000) -> list:
+        """FAN-OUT per module via ctx.pipeline (no barrier, guide §4.1): each module is its own
+        streaming chain, so a fast module never waits on a slow sibling. Each chain runs ONE
+        module-scoped solve agent seeded with ``carry_diff``. Returns the per-module Candidate
+        list (in MODULE order, never completion order), Nones filtered.
+
+        The pipeline JOURNALS each stage output, which must be JSON-serializable — a Candidate is
+        not, so the stage returns the candidate-id (a string) and we re-collect the live Candidate
+        objects from ``self._all_candidates`` (where ``_attempt`` already banked them) afterward.
+        This keeps the no-barrier streaming + replay determinism while preserving the real
+        Candidate (with its diff/meta) for the reduce step. Module attempt-ids are deterministic
+        (``id_base + index``, disjoint from base/repair/reduce namespaces) so resume replays the
+        same chains."""
+        mods = [m for m in (modules or []) if isinstance(m, dict)]
+        if not mods:
+            return []
+
+        def _solve_stage(_prev, module, index):
+            cand = self.solve_module(module, carry_diff=carry_diff, attempt_id=id_base + index)
+            # forward only the JSON-safe candidate-id (the live Candidate stays in _all_candidates)
+            return cand.candidate_id if cand is not None else ""
+
+        ids = self.pipeline(list(mods), _solve_stage)
+        by_id = {c.candidate_id: c for c in self._all_candidates if c is not None}
+        return [by_id[i] for i in ids if i and i in by_id]
+
+    def reduce_residuals(self, candidates: Sequence[Optional[Candidate]], *,
+                         carry_diff: str = "") -> dict:
+        """REDUCE step — plain Python, NO LLM, zero tokens. Merge the per-module candidate diffs
+        into ONE worktree (carry_diff first, then each candidate's diff in the order given), run
+        the FULL gold suite ONCE, and return the exact residual failing node-ids.
+
+        A per-module diff that fails to apply (apply_diff False = strict AND 3-way both failed) is
+        a CONFLICT: it is recorded in ``conflicts`` (the caller re-solves it clean) and SKIPPED in
+        the merge — its progress is NEVER silently erased and the carry is NEVER dropped. The
+        carry itself failing to apply is the worst case (the running best can no longer be rebuilt
+        here): recorded as ``__carry__`` and the merge proceeds from the bare base.
+
+        Returns {"merged_diff", "residual_failing_ids", "accepted", "candidate", "conflicts",
+        "indeterminate"}. NEVER raises on conflict."""
+        cands = [c for c in candidates if c is not None]
+        conflicts: list = []
+        indeterminate = False
+        # Acquire ONE merge worktree (a deterministic id disjoint from attempt/repair namespaces).
+        merge_id = 720000 + (self._next_attempt_id() % 100000)
+        try:
+            handle = self._provider.acquire(f"{self._node_ns}reduce{merge_id}")
+        except Exception as exc:
+            self.log(f"reduce_residuals: worktree acquire failed: {exc}")
+            return {"merged_diff": carry_diff or "", "residual_failing_ids": [], "accepted": False,
+                    "candidate": None, "conflicts": ["__acquire__"], "indeterminate": True}
+        try:
+            wt = handle.path
+            if carry_diff and not apply_diff(wt, carry_diff):
+                conflicts.append("__carry__")
+                indeterminate = True
+                self.log("reduce_residuals: carry diff conflicted on merge tree (re-solve from base)")
+            for c in cands:
+                m = getattr(c, "meta", {}) or {}
+                if m.get("indeterminate") or m.get("carry_conflict"):
+                    conflicts.append(str(m.get("module") or c.candidate_id))
+                    continue
+                d = (c.diff or "")
+                if not d.strip():
+                    continue
+                if not apply_diff(wt, d):
+                    conflicts.append(str(m.get("module") or c.candidate_id))
+                    self.log(f"reduce_residuals: module diff conflicted ({m.get('module') or c.candidate_id}); "
+                             "re-queued, progress preserved")
+                    continue
+            # capture the merged diff (everything applied on top of base) + score it ONCE.
+            merged_diff = self._merged_diff(wt)
+            vr = self._scored(wt, _MergeRes(merged_diff))
+            meta = {"strategy": "reduce", "finalization_status": "completed", "ok": True,
+                    "pass_rate": vr.pass_rate, "indeterminate": vr.indeterminate,
+                    "gold_passed": int(getattr(vr, "passed", 0) or 0),
+                    "gold_total": int(getattr(vr, "total", 0) or 0),
+                    "errors": int(getattr(vr, "errors", 0) or 0),
+                    "empty_diff": not bool(merged_diff.strip()),
+                    "failing_nodeids": list(vr.failing_nodeids),
+                    "failure_excerpts": vr.failure_excerpts, "conflicts": list(conflicts)}
+            cand = candidate_from_verification(
+                candidate_id=f"{self._node_ns}reduce{merge_id}", diff=merged_diff, vr=vr,
+                rollout_id=merge_id, cluster_id=merge_id, meta=meta)
+            self._all_candidates.append(cand)
+            # Feed the merged full-suite measurement into the SPFG+ frontier so a climbing frontier
+            # (more residual ids green across loop-until-dry rounds) RESETS the patience arms, and a
+            # conflict/indeterminate reduce is neutral. No new stop logic — the existing governor
+            # authority decides; should_continue_waves() consumes the updated _wave_state().
+            self._observe([cand])
+            if cand.accepted:
+                self._checkpoint_accepted(cand)
+            return {"merged_diff": merged_diff, "residual_failing_ids": list(vr.failing_nodeids),
+                    "accepted": bool(cand.accepted), "candidate": cand,
+                    "conflicts": list(conflicts), "indeterminate": bool(indeterminate or vr.indeterminate)}
+        finally:
+            self._provider.release(handle, confirm_patch_extracted=True)
+
+    def _merged_diff(self, wt: str) -> str:
+        """The full git diff of the merge worktree vs its base commit (the carry + every applied
+        module diff, captured as a single replay-safe artifact)."""
+        from ..isolation.worktree import _git
+        res = _git("diff", self._provider.base_commit, cwd=wt)
+        if res.returncode == 0 and (res.stdout or "").strip():
+            return res.stdout
+        # fall back to the worktree-relative diff (unstaged) when the base-rev form is empty.
+        res2 = _git("diff", cwd=wt)
+        return res2.stdout if res2.returncode == 0 else ""
+
+    def repair_residual(self, residual_ids: Sequence[str], *, carry_diff: str,
+                        excerpts: str = "", attempt_id: Optional[int] = None,
+                        round: int = 0, vendor: Optional[str] = None,
+                        model: Optional[str] = None, prompt: Optional[str] = None) -> Optional[Candidate]:
+        """LOOP-UNTIL-DRY repair step — run ONE repair agent on the LIVE merged tree (carry_diff
+        applied into the fresh worktree BEFORE the agent), scoped to the EXACT still-failing gold
+        node-ids. Unlike repair_attempt (which pastes the parent diff as prompt TEXT), this seam
+        APPLIES the merged tree so the agent EDITS live code — closing the off-by-K class.
+        Returns a Candidate (or an indeterminate carry-conflict Candidate, or None)."""
+        ids = [str(i) for i in (residual_ids or [])]
+        aid = self._next_attempt_id() if attempt_id is None else _as_int_id(attempt_id)
+        if attempt_id is None:
+            aid = 710000 + int(round)
+        if prompt is None:
+            # Prefer the eval-provided CONTRACT 2 builder (state line + un-redacted excerpts when
+            # enabled) when the harness wired one onto repo_map; else the built-in residual brief.
+            _bb = (self.repo_map or {}).get("brief_builders") or {}
+            _mk = _bb.get("residual_repair")
+            if callable(_mk):
+                try:
+                    _best = None
+                    for c in self.all_candidates():
+                        cm = getattr(c, "meta", {}) or {}
+                        if cm.get("indeterminate") or cm.get("carry_conflict"):
+                            continue
+                        if _best is None or int(cm.get("gold_passed", 0) or 0) > int((_best.meta or {}).get("gold_passed", 0) or 0):
+                            _best = c
+                    bm = (_best.meta if _best is not None else {}) or {}
+                    passed = int(bm.get("gold_passed", 0) or 0)
+                    total = int(bm.get("gold_total", 0) or 0)
+                    prompt = _mk(self, ids, passed, total, excerpts=excerpts)
+                except Exception as exc:
+                    self.log(f"repair_residual: residual_repair brief builder failed ({exc}); using default")
+        if prompt is None:
+            base = self._prompt_builder(self, aid, "residual_repair")
+            ids_block = "\n".join(ids[:40]) if ids else "(see the failing subset)"
+            excerpt_block = (("\nFailure evidence:\n" + excerpts + "\n") if (excerpts or "").strip() else "")
+            prompt = (
+                base
+                + "\n\n--- RESIDUAL REPAIR (live merged tree) ---\n"
+                + "The merged implementation is ALREADY IN THIS WORKSPACE — keep what works. "
+                + f"These EXACT gold tests still FAIL; make them pass without breaking the rest:\n"
+                + ids_block + "\n"
+                + excerpt_block
+                + "Make the smallest correct change to turn these specific tests green. Do NOT edit "
+                + "tests. Re-run only the failing subset and iterate.\n"
+            )
+        return self._attempt(
+            aid=aid, prefix="rr", node_prefix="resrepair", prompt=prompt, strategy="residual_repair",
+            vendor=vendor, model=model, pre_apply_diff=carry_diff,
+            scoped_extra={"residual_ids": ids[:40], "round": int(round)},
+            meta_extra={"residual_repair": True},
+        )
 
     # ---- RALPH-WIGGUM baseline: naive persistence with feedback on one lineage ----
     def ralph_loop(self, *, id_base: int = 800000) -> Optional[Candidate]:

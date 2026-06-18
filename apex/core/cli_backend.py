@@ -5684,6 +5684,45 @@ def _docker_sandbox_exec_command(
     ]
 
 
+def _codex_cli_reasoning_effort(*, allow_edits: bool) -> str:
+    """Resolve the per-exec codex reasoning effort to pin as a ``-c`` flag.
+
+    PINNED per-exec (not left to the config.toml fallback) so it lands in the JSONL
+    turn/launch events and cannot be silently under-applied: ``xhigh`` for edit turns
+    (solve / repair / converge — workspace-write) and ``high`` for read-only turns
+    (explore / decompose). Operators can override the two levels via
+    ``APEX_CODEX_EFFORT_EDIT`` / ``APEX_CODEX_EFFORT_READONLY``; an empty/``off`` value
+    suppresses the flag (falls back to the config default).
+    """
+    if allow_edits:
+        raw = os.environ.get("APEX_CODEX_EFFORT_EDIT", "xhigh")
+    else:
+        raw = os.environ.get("APEX_CODEX_EFFORT_READONLY", "high")
+    return str(raw or "").strip().lower()
+
+
+def _codex_cli_reasoning_effort_args(
+    config: LLMConfig, *, allow_edits: bool
+) -> list[str]:
+    """``-c model_reasoning_effort=<eff>`` unless the operator already pinned it.
+
+    Returns ``[]`` when the effort is suppressed (empty / ``off`` / ``none``) or when
+    ``config.cli_args`` already carries an explicit ``-c model_reasoning_effort=`` so we
+    never emit a duplicate (codex takes the LAST ``-c`` value, but a duplicate is noise).
+    """
+    explicit = [str(arg) for arg in getattr(config, "cli_args", []) or []]
+    for index, arg in enumerate(explicit):
+        if arg == "-c" and index + 1 < len(explicit):
+            if str(explicit[index + 1]).strip().startswith("model_reasoning_effort"):
+                return []
+        if arg.startswith("model_reasoning_effort"):
+            return []
+    effort = _codex_cli_reasoning_effort(allow_edits=allow_edits)
+    if effort in {"", "none", "off", "0", "false"}:
+        return []
+    return ["-c", f"model_reasoning_effort={effort}"]
+
+
 def _claude_cli_effort_args(config: LLMConfig) -> list[str]:
     """Return Claude Code effort args unless the operator supplied them."""
 
@@ -11547,6 +11586,12 @@ class CLIModelClient:
                 "-c",
                 f"projects.{shlex.quote(working_dir)}.trust_level=trusted",
             )
+            # PIN reasoning effort per-exec as an explicit -c flag (xhigh for edit turns,
+            # high for read-only) so it lands in the JSONL turn/launch events instead of
+            # relying on the copied config.toml fallback (which can be silently
+            # under-applied). Routed through add_codex_exec_config so it lands in the
+            # right place for both target-runtime (--ignore-user-config) and normal runs.
+            add_codex_exec_config(*_codex_cli_reasoning_effort_args(self.config, allow_edits=allow_edits))
             if target_runtime_enforced:
                 # Codex honors --ignore-user-config at the exec subcommand layer;
                 # keep target-runtime -c overrides there so the Meta launcher does
