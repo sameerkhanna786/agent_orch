@@ -582,12 +582,34 @@ def autosolve(
     # infra/timeout. Populated whether the stop propagated (omega) or was caught inside the
     # workflow (ralph): ctx carries the halt reason either way.
     if getattr(ctx, "_halt_reason", "") and not bool(winner is not None and getattr(winner, "accepted", False)):
+        # SPFG+ outcome taxonomy: map the halt reason to a distinct outcome so the
+        # reclassifier/ledger books a genuine no-progress plateau (cut:no-progress) separately
+        # from a harness/scorer wall (cut:harness-stall, excluded from solve-rate denominators)
+        # and from an honest explored/ceiling stop. seconds_since_frontier_improved /
+        # valid_measurements / indeterminate_total / frontier_history surface WHY.
+        _reason = str(ctx._halt_reason or "")
+        if _reason == "cut:no-progress":
+            _outcome = "cut:no-progress"
+        elif _reason == "cut:harness-stall":
+            _outcome = "cut:harness-stall"
+        elif _reason.startswith("cut:"):
+            _outcome = _reason
+        else:
+            _outcome = "stopped-ceiling"
         cut_losses = {
             "reason": ctx._halt_reason,
             "is_cut": bool(getattr(ctx, "_halt_is_cut", False)),
+            "outcome": _outcome,
             "best_gold_passed": int(getattr(ctx, "_best_gold_passed", 0)),
             "best_pass_rate": float(getattr(ctx, "_best_pass_rate", 0.0)),
             "agents_used": engine.agents_used(),
+            "valid_measurements": int(getattr(ctx, "_valid_measurements", 0)),
+            "seconds_since_frontier_improved": float(
+                (getattr(ctx, "_valid_wall_accum", 0.0) - getattr(ctx, "_valid_wall_at_best", 0.0))
+                if (getattr(ctx, "_wall_started", False)
+                    and getattr(ctx, "_valid_wall_at_best", None) is not None) else 0.0),
+            "indeterminate_total": int(getattr(ctx, "_indeterminate_total", 0)),
+            "frontier_history": list(getattr(ctx, "_frontier_history", []) or []),
         }
 
     return {

@@ -25,7 +25,10 @@ class RunGovernor:
     def __init__(self, *, engine, agent_ceiling: int = 1000, token_budget: Optional[int] = None,
                  agent_budget: Optional[int] = None, plateau_k_dry: int = 2,
                  plateau_patience: Optional[int] = None, nonresult_streak_cut: int = 8,
-                 sterile_streak_cut: int = 8, token_cut_fraction: float = 0.35):
+                 sterile_streak_cut: int = 8, token_cut_fraction: float = 0.35,
+                 plateau_wall_seconds: Optional[float] = None,
+                 plateau_patience_meas: Optional[int] = None,
+                 harness_stall_cut: int = 8):
         self._engine = engine
         self.agent_ceiling = int(agent_ceiling)
         self.token_budget = token_budget          # opt-in (None = unbounded; mirrors engine.budget.total)
@@ -53,6 +56,25 @@ class RunGovernor:
         self.nonresult_streak_cut = max(1, int(nonresult_streak_cut))
         self.sterile_streak_cut = max(1, int(sterile_streak_cut))
         self.token_cut_fraction = float(token_cut_fraction)
+        # ---- SPFG+ "Solve-Progress Frontier Governor" arms (Backbone 2.5) ----
+        # The cut:no-progress soft plateau is now a FRONTIER DUAL-AND: it fires only when a
+        # genuine no-solve-progress plateau is reached on BOTH the VALID-measurement window
+        # (valid_measurements_since_improvement >= plateau_patience_meas) AND the journaled
+        # VALID-measurement wall clock (seconds_since_frontier_improved >= plateau_wall_seconds).
+        # Indeterminate (harness/scorer) measurements are NEUTRAL to both arms — a wall of them
+        # trips the DISTINCT cut:harness-stall (indeterminate_streak >= harness_stall_cut), never
+        # cut:no-progress. The legacy attempts arm (plateau_patience) is RETAINED as a back-compat
+        # backstop and can still cut on attempts alone (it never cuts EARLIER than before); the new
+        # frontier dual-AND is an additional, indeterminate-aware path. Defaults from the SHARED
+        # frontier module (single-sourced; APEX_FRONTIER_* / LADDER_* env-overridable; no repo
+        # identity in any decision path).
+        from .frontier import FrontierParams
+        _fp = FrontierParams.from_env()
+        self.plateau_wall_seconds = float(
+            plateau_wall_seconds if plateau_wall_seconds is not None else _fp.w_time)
+        self.plateau_patience_meas = max(1, int(
+            plateau_patience_meas if plateau_patience_meas is not None else _fp.w_meas))
+        self.harness_stall_cut = max(1, int(harness_stall_cut))
 
     def can_start(self, *, reserve: int = 1) -> bool:
         """May a NEW unit of work be dispatched? Gates on the (opt-in) token budget, the
@@ -78,14 +100,35 @@ class RunGovernor:
           nonresult_streak           consecutive ATTEMPTS producing zero usable work (size-invariant)
           sterile_streak             consecutive ATTEMPTS with no new useful diff AND no improvement
           tokens_since_improvement   output tokens spent since the BEST last improved
-        Reasons: cut:* = a genuine non-progress FAILURE (CutLosses); stop:/plateau: = an
-        honest "explored, no headroom" stop (PlateauStop)."""
+          valid_measurements_since_improvement  VALID measurements since the FRONTIER last rose (SPFG+)
+          seconds_since_frontier_improved       journaled VALID-measurement wall-secs since the rise (SPFG+)
+          indeterminate_streak       consecutive harness/scorer-failed measurements (SPFG+; -> harness-stall)
+        Reasons: cut:* = a genuine non-progress FAILURE (CutLosses); cut:harness-stall = a
+        harness/scorer wall (no real measurement); stop:/plateau: = an honest "explored, no
+        headroom" stop (PlateauStop)."""
         # HARD CUTS — objectively dead states no amount of identical rollouts escapes.
         if int(state.get("nonresult_streak", 0)) >= self.nonresult_streak_cut:
             return (False, "cut:nonresult-streak")
         if int(state.get("sterile_streak", 0)) >= self.sterile_streak_cut:
             return (False, "cut:sterile-diff-streak")
-        # SOFT PLATEAU — no distance-to-solve gain within the attempt-patience window.
+        # HARNESS-STALL — a wall of indeterminate (harness/scorer-failed) measurements that
+        # never produced a real test outcome. A DISTINCT outcome from a genuine no-progress
+        # plateau: the arm was never actually measured, so it must not be booked as
+        # cut:no-progress. Fires before the soft plateau (the indeterminate stretch is
+        # neutral to the frontier arms, so those would never fire here anyway).
+        if int(state.get("indeterminate_streak", 0)) >= self.harness_stall_cut:
+            return (False, "cut:harness-stall")
+        # SOFT PLATEAU (SPFG+ FRONTIER DUAL-AND) — a GENUINE no-solve-progress plateau: BOTH
+        # the VALID-measurement window AND the journaled VALID-measurement wall clock have
+        # elapsed since the frontier (best gold-pass count / pass_rate) last rose. Any frontier
+        # rise resets BOTH arms; indeterminate measurements advance NEITHER. This is the arm that
+        # never force-cuts a still-progressing run (the minitorch case).
+        if (int(state.get("valid_measurements_since_improvement", 0)) >= self.plateau_patience_meas
+                and float(state.get("seconds_since_frontier_improved", 0.0)) >= self.plateau_wall_seconds):
+            return (False, "cut:no-progress")
+        # LEGACY ATTEMPTS BACKSTOP — the original attempt-since-improvement no-progress floor,
+        # RETAINED for back-compat (it never cuts EARLIER than before; the frontier dual-AND above
+        # is the indeterminate-aware primary path).
         if int(state.get("attempts_since_improvement", 0)) >= self.plateau_patience:
             return (False, "cut:no-progress")
         # OPT-IN TOKEN FLOOR — only when a token budget is set (unbounded runs skip this).
@@ -103,4 +146,7 @@ class RunGovernor:
                 "plateau_patience": self.plateau_patience,
                 "nonresult_streak_cut": self.nonresult_streak_cut,
                 "sterile_streak_cut": self.sterile_streak_cut,
-                "token_cut_fraction": self.token_cut_fraction}
+                "token_cut_fraction": self.token_cut_fraction,
+                "plateau_wall_seconds": self.plateau_wall_seconds,
+                "plateau_patience_meas": self.plateau_patience_meas,
+                "harness_stall_cut": self.harness_stall_cut}

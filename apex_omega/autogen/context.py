@@ -174,6 +174,28 @@ class OrchestrationContext:
         self._seen_shas: set = set()
         self._tokens_at_best = 0
         self._agents_at_best = 0              # agents_used when the BEST last improved (cut unit)
+        # ---- SPFG+ "Solve-Progress Frontier Governor" arms (Backbone 2.5) ----
+        # The FRONTIER = the best-so-far gold-pass COUNT in a VALID measurement (pass_rate is the
+        # secondary tie-break). cut:no-progress now fires only on a GENUINE no-solve-progress
+        # plateau: BOTH a VALID-measurement window AND a journaled VALID-measurement wall clock
+        # elapsed since the frontier last rose. Indeterminate (harness/scorer-failed) measurements
+        # are NEUTRAL to both arms and instead feed the DISTINCT cut:harness-stall streak — fixing
+        # the real bug where attempts_since_improvement advanced the plateau clock through a harness
+        # outage. The wall scalar is a JOURNALED, replay-deterministic accumulation (a fixed nominal
+        # per-VALID-measurement increment from the config per-agent timeout — NEVER a live clock),
+        # so a journal replay reconstructs the exact same seconds_since_frontier_improved.
+        self._valid_measurements = 0
+        self._valid_measurements_at_best = 0
+        self._valid_wall_accum = 0.0
+        self._valid_wall_at_best = None       # None => clock UNSTARTED (no valid measurement yet)
+        self._indeterminate_streak = 0
+        self._indeterminate_total = 0         # cumulative (telemetry / cut_losses ledger)
+        self._wall_started = False
+        self._frontier_history: list = []     # [(valid_idx, gold_count)] at each strict frontier rise
+        # The nominal per-VALID-measurement wall increment. Deterministic (a config scalar, not a
+        # live clock) so the wall arm reconstructs identically on resume. Defaults to the per-agent
+        # timeout (difficulty-derived) or a fixed nominal when the cell is unbounded.
+        self._valid_wall_increment = float(self.per_agent_timeout_seconds or 2400)
         self._halt_reason = ""
         self._halt_is_cut = False
         self._halted = False
@@ -316,6 +338,10 @@ class OrchestrationContext:
             if c is None:
                 n_nonresult += 1
                 n_sterile += 1   # a None result is both no-work and no-useful-diff
+                # SPFG+: a None result is an indeterminate (no real measurement) — NEUTRAL to the
+                # frontier arms; it only feeds the harness-stall streak.
+                self._indeterminate_streak += 1
+                self._indeterminate_total += 1
                 continue
             m = getattr(c, "meta", {}) or {}
             gp = int(m.get("gold_passed", 0) or 0)
@@ -325,6 +351,21 @@ class OrchestrationContext:
                 round_gold = gp
             if pr > round_pass:
                 round_pass = pr
+            # SPFG+ valid-measurement filter: a candidate contributes to the FRONTIER and to the
+            # patience clocks ONLY if it is a real test outcome. An indeterminate (harness/scorer
+            # failure) measurement is NEUTRAL to both frontier arms and feeds the harness-stall
+            # streak instead; a valid measurement increments the valid count + the journaled wall
+            # and resets the streak.
+            if bool(m.get("indeterminate")):
+                self._indeterminate_streak += 1
+                self._indeterminate_total += 1
+            else:
+                self._indeterminate_streak = 0
+                self._valid_measurements += 1
+                if self._valid_wall_at_best is None:
+                    self._valid_wall_at_best = 0.0   # first VALID measurement STARTS the clock
+                    self._wall_started = True
+                self._valid_wall_accum += self._valid_wall_increment
             fs = m.get("finalization_status")
             if bool(m.get("indeterminate")) or (
                     fs in ("policy_violation", "infra_nonresult", "timeout") and gp <= 0 and pr <= 0.0):
@@ -342,11 +383,17 @@ class OrchestrationContext:
         # not a regression cut; a high-but-flat pass_rate with no new gold is also dry.
         improved = (round_gold > self._best_gold_passed) or (round_pass > self._best_pass_rate + 1e-9)
         if improved:
+            # record a STRICT gold-count rise in the frontier history (telemetry / ledger).
+            if round_gold > self._best_gold_passed:
+                self._frontier_history.append((self._valid_measurements, int(round_gold)))
             self._best_gold_passed = round_gold
             self._best_pass_rate = round_pass
             self._dry_rounds = 0
             self._tokens_at_best = self._engine.budget.spent()
             self._agents_at_best = self._engine.agents_used()
+            # SPFG+: a FRONTIER rise resets BOTH patience arms (valid-measurement window + wall).
+            self._valid_measurements_at_best = self._valid_measurements
+            self._valid_wall_at_best = self._valid_wall_accum if self._wall_started else None
         else:
             self._dry_rounds += 1
         # HARD-CUT STREAKS counted in ATTEMPTS, not waves (review M1: SIZE-INVARIANT — a width-1
@@ -373,6 +420,12 @@ class OrchestrationContext:
         """The cut-losses detector inputs at the current wave boundary. All cut signals are in
         ATTEMPTS (agents), so the rule is invariant to the wave schedule and the arm width."""
         agents = self._engine.agents_used()
+        # SPFG+ wall arm: the journaled VALID-measurement wall seconds since the frontier last rose.
+        # 0 until the clock has started (first valid measurement). Reconstructed deterministically
+        # on resume from the journaled valid-measurement count (no live clock), so the cached
+        # _wave_verdict replays identically.
+        secs = ((self._valid_wall_accum - self._valid_wall_at_best)
+                if (self._wall_started and self._valid_wall_at_best is not None) else 0.0)
         return {
             "attempts_since_improvement": max(0, agents - self._agents_at_best),
             "dry_rounds": self._dry_rounds,          # telemetry only (not a cut signal)
@@ -380,6 +433,11 @@ class OrchestrationContext:
             "nonresult_streak": self._nonresult_streak,
             "sterile_streak": self._sterile_streak,
             "tokens_since_improvement": max(0, self._engine.budget.spent() - self._tokens_at_best),
+            # SPFG+ frontier arms (matching FrontierTracker.state() + governor.verdict reads).
+            "valid_measurements": self._valid_measurements,
+            "valid_measurements_since_improvement": max(0, self._valid_measurements - self._valid_measurements_at_best),
+            "seconds_since_frontier_improved": secs,
+            "indeterminate_streak": self._indeterminate_streak,
         }
 
     # ---- journaled wave decision (Backbone 2.0 determinism-under-resume) ----

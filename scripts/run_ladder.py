@@ -27,6 +27,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+# SPFG+ Tier-1: the relaunch/continue gate is FRONTIER-based (gold-pass-COUNT progress),
+# not pure journal activity. The shared definition lives in apex_omega.engine.frontier and
+# is consumed identically by all three tiers (ladder here, Mode-C governor/context next).
+from apex_omega.engine.frontier import (  # noqa: E402
+    FrontierOutcome,
+    OUTCOME_TO_CUT_REASON,
+    frontier_defaults,
+    frontier_from_rollouts,
+    frontier_from_wal,
+    plateau_verdict,
+    w_meas_effective,
+)
+
 VENV = os.environ.get("APEX_OMEGA_PYTHON", sys.executable)
 # LADDER_DIR is overridable so a seed sweep runs each seed into its own resumable tree
 # (e.g. LADDER_DIR=runs/ladder_s0, _s1, _s2 for n>=3 seeds + pass@k across them).
@@ -57,6 +72,11 @@ MIN_FREE_MB = int(os.environ.get("LADDER_MIN_FREE_MB", "1200"))
 # from the journal — UP TO this many times, and only while it keeps making journal progress
 # (so an adversarial/stuck cell still terminates). This replaces run-4's discard-on-timeout.
 LADDER_MAX_RELAUNCH = int(os.environ.get("LADDER_MAX_RELAUNCH", "8"))
+# SPFG+ frozen, env-overridable knobs (single-sourced via apex_omega.engine.frontier so the
+# ladder gate and the Mode-C governor read the SAME defaults). W_TIME=7200s VALID-measurement
+# wall, W_MEAS=12 valid measurements, INDET_CEIL=24 indeterminate ceiling (-> cut:harness-stall),
+# POLL_S=300 daemon poll cadence.
+W_TIME, W_MEAS, INDET_CEIL, POLL_S = frontier_defaults()
 _KEEP_SUFFIXES = (".json", ".jsonl", ".md", ".diff", ".patch", ".txt", ".log")
 _lock = threading.Lock()
 
@@ -263,6 +283,100 @@ def _journal_progress(rundir: Path):
     return best
 
 
+def _arm_budget(label: str, flags: list[str], rundir: Path) -> int | None:
+    """The arm's finite ATTEMPT budget (for w_meas_effective fairness scaling), or None
+    for unbounded orchestrators. Derived from the cell flags (the same source the cell was
+    launched with) with a Mode-A benchmark_state fallback.
+
+      - B0 1-shot                  -> 1   (w_meas_eff floor 3 but <3 valid measurements ever
+                                            produced, so NEVER plateau-cuttable)
+      - best-of-N (--rollouts N)   -> N   (best-of-8 -> w_meas_eff 5)
+      - B2 full-cap16              -> 16  (-> w_meas_eff 10)
+      - autogen orchestrators / ralph (--autogen-max-agents <big>) -> None (unbounded)
+      - undeterminable             -> None (conservative: keeps the global window)
+    """
+    arms = []
+    rollouts = None
+    autogen = False
+    it = iter(flags)
+    for tok in it:
+        if tok == "--arms":
+            arms.append(next(it, ""))
+        elif tok == "--rollouts":
+            try:
+                rollouts = int(next(it, ""))
+            except (TypeError, ValueError):
+                rollouts = None
+        elif tok == "--autogen-max-agents":
+            autogen = True
+            next(it, None)
+    arms_s = " ".join(arms)
+    if autogen or "autogen_orchestrator" in arms_s:
+        return None                              # unbounded omega / ralph
+    if "B0_single_model" in arms_s:
+        return 1
+    if "B2_v1_full_cap16" in arms_s:
+        return 16
+    if rollouts is not None:
+        return rollouts
+    # Mode-A fallback: max_rollouts * candidates_per_rollout from benchmark_state metadata.
+    for bs in Path(rundir).rglob("benchmark_state.json"):
+        try:
+            d = json.loads(bs.read_text())
+        except (OSError, ValueError):
+            continue
+        alloc = (((d.get("metadata") or {}).get("ablation_config") or {}).get("allocator") or {})
+        mr = alloc.get("max_rollouts")
+        if isinstance(mr, int) and mr > 0:
+            return mr
+    return None
+
+
+def frontier_state(rundir: Path):
+    """The SPFG+ progress reconstruction for either mode (Tier-1 wraps BOTH).
+
+    Mode-C (an in-process orchestrator run) is detected by the presence of a
+    ``calls_wal.jsonl`` journal; otherwise the cell is a Mode-A best-of-N subprocess and the
+    frontier is read from rollout_status / candidate_scorecard artifacts. Returns a
+    ``FrontierState`` whose ``.as_state()`` feeds ``plateau_verdict``.
+    """
+    if _has_journal(rundir):
+        return frontier_from_wal(rundir)
+    return frontier_from_rollouts(rundir)
+
+
+def relaunch_decision(rundir: Path, label: str, flags: list[str], attempt: int,
+                      last_prog: int | None):
+    """The frontier-aware relaunch/continue gate (replaces the activity prog<=last_prog cut).
+
+    Returns ``(action, reason, frontier, fs)`` where action is one of:
+      - "relaunch"   : the gold frontier ROSE since the last attempt (still-progressing,
+                       e.g. the minitorch case whose pass-count was climbing) -> warm-resume.
+      - "plateau"    : a GENUINE no-solve-progress plateau (cut:no-progress).
+      - "harness"    : an indeterminate/harness wall (cut:harness-stall).
+      - "exhausted"  : LADDER_MAX_RELAUNCH backstop reached while not plateau-cut.
+
+    A rising frontier ALWAYS wins (relaunch) regardless of wall-time — SPFG+ never bounds
+    total wall-time; it cuts only on a dual-AND plateau or a harness wall.
+    """
+    fs = frontier_state(rundir)
+    frontier = int(fs.gold_frontier)
+    rose = (last_prog is None) or (frontier > last_prog)
+    budget = _arm_budget(label, flags, rundir)
+    w_meas_eff = w_meas_effective(W_MEAS, budget)
+    outcome, why = plateau_verdict(fs.as_state(), w_meas_eff, W_TIME, INDET_CEIL)
+    if rose:
+        return ("relaunch", f"frontier rose to {frontier}", frontier, fs)
+    if outcome == FrontierOutcome.PLATEAU_CUT.value:
+        return ("plateau", f"{OUTCOME_TO_CUT_REASON[outcome]}: {why}", frontier, fs)
+    if outcome == FrontierOutcome.INDETERMINATE_CUT.value:
+        return ("harness", f"{OUTCOME_TO_CUT_REASON[outcome]}: {why}", frontier, fs)
+    if attempt >= LADDER_MAX_RELAUNCH:
+        return ("exhausted", f"{LADDER_MAX_RELAUNCH} relaunches exhausted (frontier={frontier}, "
+                f"within window: {why})", frontier, fs)
+    return ("relaunch", f"within window, warm resume (frontier={frontier}; {why})", frontier, fs)
+
+
 def run_cell(label: str, flags: list[str], repo: str, env_overlay: dict | None = None,
              seed: int = 0) -> None:
     rundir = _rundir(label, repo, seed)
@@ -298,10 +412,14 @@ def run_cell(label: str, flags: list[str], repo: str, env_overlay: dict | None =
     if env_overlay:                           # per-cell overlay (e.g. design-contract A/B)
         env.update(env_overlay)
     t0 = time.monotonic()
-    # Backbone 1.3: PAUSE+RESUME instead of guillotine. On a kill, RELAUNCH against the
-    # same warm --run-dir (the child reattaches the journal and replays the prior prefix
-    # as cache HITs) — up to LADDER_MAX_RELAUNCH times and only while journal progress
-    # advances. A verified solve banked before any kill is recovered, never discarded.
+    # Backbone 1.3 + SPFG+: PAUSE+RESUME instead of guillotine. On a kill, RELAUNCH against
+    # the same warm --run-dir (the child reattaches the journal and replays the prior prefix
+    # as cache HITs). The relaunch/continue DECISION is now FRONTIER-based: relaunch while the
+    # gold-pass COUNT is climbing (still-progressing, e.g. minitorch's pass-count rose over
+    # 6 relaunches and should NOT have been force-cut), and cut ONLY on a genuine dual-AND
+    # no-progress plateau (cut:no-progress) or a sustained indeterminate/harness wall
+    # (cut:harness-stall) — never on pure inactivity. A verified solve banked before any kill
+    # is recovered FIRST, never discarded.
     last_prog = None
     completed = False
     for attempt in range(1 + LADDER_MAX_RELAUNCH):
@@ -314,25 +432,42 @@ def run_cell(label: str, flags: list[str], repo: str, env_overlay: dict | None =
             if not _has_journal(rundir):
                 emit("error", {"error": f"{type(exc).__name__}: {exc}"[:200]})
                 return
-            prog = _journal_progress(rundir)
-            stuck = last_prog is not None and prog <= last_prog
-            if attempt >= LADDER_MAX_RELAUNCH or stuck:
-                ckpt = _recover_checkpoint(rundir)
-                if ckpt:
-                    emit("done", {
-                        "solved": 1, "total": 1, "pass_pct": 100.0,
-                        "wall_s": round(time.monotonic() - t0, 1), "recovered_from_checkpoint": True,
-                        "candidate_id": ckpt.get("candidate_id"),
-                        "_note": f"killed ({type(exc).__name__}) after {attempt} relaunch(es); "
-                                 "verified solve recovered from journal"})
-                    return
-                why = "no journal progress" if stuck else f"{LADDER_MAX_RELAUNCH} relaunches exhausted"
-                emit("error",
-                      {"error": f"{type(exc).__name__}: {exc} ({why})"[:200]})
+            action, why, frontier, fs = relaunch_decision(
+                rundir, label, flags, attempt, last_prog)
+            if action == "relaunch":
+                last_prog = frontier
+                emit("relaunch", {"attempt": attempt + 1, "gold_frontier": frontier,
+                                  "valid_measurements": fs.valid_measurements, "reason": why})
+                # do NOT _strip_checkout between attempts (keep journal + venv warm for resume)
+                continue
+            # A cut (plateau / harness-stall) or relaunch-budget exhaustion. ALWAYS consult the
+            # acceptance checkpoint FIRST so a banked verified solve is never discarded (run-4
+            # data-loss bug) even when the frontier gate decided to stop.
+            ckpt = _recover_checkpoint(rundir)
+            if ckpt:
+                emit("done", {
+                    "solved": 1, "total": 1, "pass_pct": 100.0,
+                    "wall_s": round(time.monotonic() - t0, 1), "recovered_from_checkpoint": True,
+                    "candidate_id": ckpt.get("candidate_id"), "gold_frontier": frontier,
+                    "_note": f"killed ({type(exc).__name__}) after {attempt} relaunch(es); "
+                             f"verified solve recovered from journal despite {action}"})
                 return
-            last_prog = prog
-            emit("relaunch", {"attempt": attempt + 1, "progress": list(prog)})
-            # do NOT _strip_checkout between attempts (keep the journal + venv warm for resume)
+            base = {"error": f"{type(exc).__name__}: {exc} ({why})"[:200],
+                    "outcome": OUTCOME_TO_CUT_REASON.get(
+                        FrontierOutcome.PLATEAU_CUT.value if action == "plateau"
+                        else FrontierOutcome.INDETERMINATE_CUT.value, action),
+                    "gold_frontier": frontier, "valid_measurements": fs.valid_measurements,
+                    "indeterminate_total": fs.indeterminate_total,
+                    "seconds_since_frontier_improved": fs.as_state()[
+                        "seconds_since_frontier_improved"]}
+            if action == "plateau":
+                emit("plateau_cut", base)
+            elif action == "harness":
+                emit("indeterminate", base)
+            else:  # exhausted relaunch backstop (frontier still within window)
+                base["outcome"] = "exhausted-relaunch-backstop"
+                emit("error", base)
+            return
     res = parse_result(rundir)
     res["wall_s"] = round(time.monotonic() - t0, 1)
     # review-fix #8 (belt-and-suspenders): a clean child completion that reports unsolved but
