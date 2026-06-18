@@ -39,7 +39,14 @@ CONCURRENCY = int(os.environ.get("LADDER_CONCURRENCY", "2"))
 SEEDS = max(1, int(os.environ.get("LADDER_SEEDS", "1")))
 # 3600 (was 2400): heavy single-solves (mimesis ~1430-1921s, pydantic heavier) were
 # clipped at exactly 2400s under C=6 contention (B0-mimesis, baseline-pydantic in run-2).
-CELL_TIMEOUT = int(os.environ.get("LADDER_CELL_TIMEOUT", "3600"))
+# FAIR wall (2026-06-17): 24h, not 3600s. The 3600s wall truncated the heavy Mode-A best-of-8
+# arms mid-work (B0/baseline jinja still grinding in 'patcher', pass-rate climbing) while the lean
+# Mode-C arms finished in <1100s — an UNFAIR guillotine. 86400 is so generous no arm truncates
+# mid-work, yet it is a FINITE NUMBER (not 0/None) so every downstream cap stays well-defined and
+# BOUNDED: the per-agent watchdog (context.py min(_pa, t)=_pa), eval_cap (commit0_autogen), the
+# Mode-A per-step caps, and the outer subprocess backstop (CELL_TIMEOUT+600). Each arm now runs to
+# its NATURAL cap (best-of-8 completion / plateau governor); report agents/solve + wall as cost.
+CELL_TIMEOUT = int(os.environ.get("LADDER_CELL_TIMEOUT", "86400"))
 # Disk safety: each cell writes ~300M of per-rollout repo checkouts. On a near-full
 # disk that causes ENOSPC, which corrupts cells (fast-fails that look like real
 # failures). So we (a) refuse to start a cell unless there's headroom, and (b) strip
