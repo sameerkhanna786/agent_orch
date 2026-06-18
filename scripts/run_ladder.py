@@ -165,7 +165,12 @@ def cell_done(rundir: Path) -> bool:
     for f in _reports(rundir):
         try:
             d = json.loads(f.read_text())
-            if d.get("completed") is True or "solved_tasks" in d:
+            # A Mode-C autogen_cell_report.json has NO "completed" key (completed=None) and is
+            # written only at cell end, so solved_tasks present => done. A Mode-A
+            # benchmark_report.json sets "completed" EXPLICITLY; a partial/crashed cell can leave
+            # completed=False with solved_tasks=0 — that must NOT count as done (else on resume it
+            # is skipped and recorded as a FALSE 0/total failure, poisoning the denominator).
+            if d.get("completed") is True or ("solved_tasks" in d and d.get("completed") is None):
                 return True
         except Exception:
             continue
