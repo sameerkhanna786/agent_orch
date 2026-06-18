@@ -57,7 +57,12 @@ class Engine:
         self.journal = journal or Journal(self.run_dir, run_id=run_id, materialize_diffs=materialize_diffs)
         self.budget = budget or Budget()
         cpu = os.cpu_count() or 4
-        self.max_workers = max(1, max_workers if max_workers is not None else min(16, cpu - 2))
+        # APEX_OMEGA_MAX_WORKERS lets a multi-cell runner cap WITHIN-cell agent fan-out so that
+        # (cells_in_parallel x within_cell_agents) stays within RAM — e.g. run more repos at once
+        # by keeping each cell narrower. Falls back to the cpu-derived default.
+        _env_mw = os.environ.get("APEX_OMEGA_MAX_WORKERS")
+        self.max_workers = max(1, max_workers if max_workers is not None
+                               else (int(_env_mw) if _env_mw and _env_mw.strip() else min(16, cpu - 2)))
         # Global concurrency gate on the *expensive* worker call (the CLI subprocess),
         # so that even a generated orchestrator that fans out 1000s of agents — across
         # nested parallel/pipeline — runs at most `max_concurrent` at once. Total agents

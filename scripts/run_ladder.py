@@ -132,9 +132,12 @@ ARMS = [
     ("omega_autogen_unbounded",  ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "3",
                                   "--autogen-author", "--autogen-max-agents", _OMEGA_MAX]),
 ]
-# fast -> slow so complete rows land early. networkx (needs Docker) + cookiecutter
-# (Docker/heavy) dropped per decision: the 4-repo ladder is a sufficient comparison.
-REPOS = ["voluptuous", "jinja", "mimesis", "pydantic"]
+# Default 4-repo comparison set. LADDER_REPOS (comma-separated commit0 target names) overrides it
+# for a custom sweep (e.g. a 12-15 repo breadth run); see apex_omega/eval/registry TARGET_NAMES.
+REPOS = (
+    [r.strip() for r in os.environ["LADDER_REPOS"].split(",") if r.strip()]
+    if os.environ.get("LADDER_REPOS") else ["voluptuous", "jinja", "mimesis", "pydantic"]
+)
 # Each EXTRA cell may carry an env overlay (4th element) merged into the child env.
 # (The gold-test design-contract A/B arm was removed: the contract is gone from the evaluated
 # path entirely — the agent gets only the commit0 prompt + gold tests — so there is nothing to
@@ -143,6 +146,17 @@ EXTRA = [
     # expensive cost-pathology witness: one fast repo only
     ("B2_v1_fullcap16", ["--arms", "B2_v1_full_cap16"], ["voluptuous"], {}),
 ]
+
+# LADDER_ARMS (comma-separated arm labels) selects + ORDERS a subset of ARMS for a custom run,
+# e.g. "omega_autogen_unbounded" alone, or "omega_autogen_unbounded,omega_template_unbounded".
+# When set, the B2 EXTRA cells are kept only if their label is named (custom runs target the
+# named arms). Combine with LADDER_REPOS for a focused arm x repo sweep.
+_arm_sel = os.environ.get("LADDER_ARMS")
+if _arm_sel:
+    _order = [a.strip() for a in _arm_sel.split(",") if a.strip()]
+    _by_label = {a[0]: a for a in ARMS}
+    ARMS = [_by_label[name] for name in _order if name in _by_label]
+    EXTRA = [e for e in EXTRA if e[0] in _order]
 
 
 def _rundir(label: str, repo: str, seed: int) -> Path:
