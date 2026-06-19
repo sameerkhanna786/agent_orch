@@ -6150,7 +6150,11 @@ def _relocate_cli_home_for_target_runtime(
             copy_host_config=False,
             copy_host_auth=copy_auth_state,
             config_dir=Path(env["CODEX_HOME"]),
-            include_service_tier=False,
+            # FAST TOKEN GENERATION at MAX reasoning: write service_tier="fast" into the isolated
+            # codex config. The host ~/.codex/config.toml runs xhigh + service_tier="fast", proving
+            # the AI Gateway supports the fast tier — so the eval's codex agents get fast generation
+            # WITHOUT lowering reasoning effort (effort stays pinned per-exec at xhigh via -c).
+            include_service_tier=True,
         )
         _harden_codex_target_runtime_home(Path(env["CODEX_HOME"]))
         public_config_files.append(Path(env["CODEX_HOME"]) / "config.toml")
