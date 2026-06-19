@@ -321,6 +321,15 @@ def author_orchestration(
         lint = lint_source(DEFAULT_ORCHESTRATION)
         return _freeze(engine, DEFAULT_ORCHESTRATION, "converge", lint.ok, lint.violations)
 
+    # HYBRID arm: a Claude-Code-style host-side PHASE PLANNER runs AROUND the frozen converge body
+    # (autosolve calls phase_planned_solve before run_orchestration). We freeze the converge default
+    # as the FALL-THROUGH body so a degenerate / abstained / crashed phase plan degrades to the
+    # proven decompose->fan-out->reduce->loop-until-dry path (then the best-of-N floor). The phase
+    # loop lives host-side (depth 0) to sidestep the ctx.workflow() one-level nesting cap.
+    if _orch_selector == "hybrid":
+        lint = lint_source(DEFAULT_ORCHESTRATION)
+        return _freeze(engine, DEFAULT_ORCHESTRATION, "hybrid", lint.ok, lint.violations)
+
     if not author:
         lint = lint_source(DEFAULT_ORCHESTRATION)
         return _freeze(engine, DEFAULT_ORCHESTRATION, "template", lint.ok, lint.violations)
@@ -451,6 +460,113 @@ def agent_scout(
             "risks": risks, "n_scouts": len(assessments), "source": "agent_scout"}
 
 
+def _run_phase_codegen(engine: Engine, ctx, repo_map: dict, phase: dict, carry: str):
+    """Per-phase GENERATED-ORCHESTRATION seam (the user's "generate orchestration code per phase";
+    flag-gated APEX_OMEGA_PHASE_CODEGEN=1, DEFAULT OFF). Author a phase-scoped ``orchestrate(ctx)``
+    via the EXISTING author/lint/freeze machinery, then run it depth-1 via ctx.workflow. Any
+    failure -> None so the caller falls back to ctx.run_phase (scoped converge). Acceptance stays
+    engine-owned; a lint/compile reject is caught."""
+    try:
+        sub_map = dict(repo_map)
+        sub_map["phase"] = {k: phase.get(k) for k in
+                            ("name", "objective", "acceptance_gold_ids", "files_owned", "modules")}
+        sub_map["approach"] = (
+            "FOCUS ONLY ON THIS PHASE: " + str(phase.get("objective") or "") + "\n"
+            "Make EXACTLY these gold tests pass (the phase acceptance): "
+            + ", ".join(map(str, (phase.get("acceptance_gold_ids") or [])[:40])))
+        source = extract_code(_author_via_llm(ctx._executor, ctx.worker_specs, sub_map, None) or "")
+        lint = lint_source(source)
+        if not source or not lint.ok:
+            engine.log("phase codegen lint-fail; falling back to scoped converge")
+            return None
+        sha = sha256_hex(source)
+        odir = Path(engine.run_dir) / "orchestrator"
+        odir.mkdir(parents=True, exist_ok=True)
+        safe_name = "".join(ch for ch in str(phase.get("name") or "p") if ch.isalnum() or ch in "-_")[:24]
+        path = odir / f"phase_{safe_name}_{sha[:12]}.py"
+        path.write_text(source, encoding="utf-8")
+        engine.log(f"phase codegen: authored + froze {path.name}; running depth-1")
+        ctx.workflow({"scriptPath": str(path)})
+        w = ctx.select(ctx.all_candidates())
+        if w is not None and getattr(w, "accepted", False):
+            return {"accepted_full": True, "candidate": w, "merged_diff": ctx.carry_best() or carry,
+                    "residual": [], "phase_passed": True, "phase_pass_count": 0, "phase_total": 0,
+                    "conflicts": []}
+        red = ctx.reduce_residuals([], carry_diff=(ctx.carry_best() or carry),
+                                   scope_ids=phase.get("acceptance_gold_ids"))
+        return {"merged_diff": red.get("merged_diff") or carry,
+                "residual": list(red.get("residual_failing_ids") or []),
+                "phase_passed": bool(red.get("phase_passed")),
+                "phase_pass_count": int(red.get("phase_pass_count", 0) or 0),
+                "phase_total": int(red.get("phase_total", 0) or 0),
+                "accepted_full": bool(red.get("accepted")), "candidate": red.get("candidate"),
+                "conflicts": list(red.get("conflicts") or [])}
+    except Exception as exc:
+        engine.log(f"phase codegen raised ({type(exc).__name__}: {exc}); falling back to scoped converge")
+        return None
+
+
+def phase_planned_solve(engine: Engine, ctx, repo_map: dict):
+    """Claude-Code-style PHASED solve (the HYBRID core). Plan ordered phases (objectives + per-phase
+    acceptance ids), solve each with the PROVEN converge inner loop scoped to its gold subset
+    (ctx.run_phase), bank partial frontier gains the instant they appear (survives an outer kill),
+    and GATE progression with an adversarial goal-alignment review so a long run never veers off the
+    goal. Acceptance stays engine-owned (ctx.select). Returns a verified Candidate or None — None
+    (degenerate plan / clean abstain) means the caller falls through to the whole-repo converge body
+    and then the best-of-N floor. Respects the converge skip-gate (easy / <2 modules / <2 phases) so
+    the easy-repo over-spawn pathology (C3) never bites."""
+    difficulty = str((repo_map or {}).get("difficulty") or "").lower()
+    if difficulty == "easy":
+        return None                                       # easy stays on the cheap path (C3)
+    plan = ctx.decompose()
+    modules = (plan or {}).get("modules") or []
+    if not plan or len(modules) <= 1:
+        return None                                       # undecomposable -> whole-repo converge
+    max_phases = {"medium": 3, "hard": 4}.get(difficulty, 3)
+    n_gate = {"medium": 1, "hard": 3}.get(difficulty, 1)
+    phases = ctx.plan_phases(plan=plan, max_phases=max_phases)
+    if not phases or len(phases) <= 1:
+        return None                                       # degenerate plan -> whole-repo converge
+    engine.log("phase plan: " + str(len(phases)) + " phases [" +
+               ", ".join(str(p.get("name")) for p in phases) + "]")
+    codegen = os.environ.get("APEX_OMEGA_PHASE_CODEGEN") == "1"
+    carry = ctx.carry_best()
+    for pidx, ph in enumerate(phases):
+        if not ctx.should_continue_waves():
+            break
+        # PRE goal-alignment gate (grounded in the live residual): proceed / revise / abort.
+        g = ctx.goal_align_gate(plan, ph, residual_ids=ctx.last_residual(), stage="pre", n=n_gate)
+        if g.get("verdict") == "abort":
+            ctx.defer("plan_abort", ph.get("name"), g.get("reason") or "")
+            engine.log("goal-gate ABORT (pre) phase=" + str(ph.get("name")) + ": " + str(g.get("reason")))
+            break
+        if g.get("verdict") == "revise" and g.get("retarget_gold_ids"):
+            ph = {**ph, "acceptance_gold_ids": list(g["retarget_gold_ids"])}
+            engine.log("goal-gate REVISE phase=" + str(ph.get("name")) + ": re-scoped acceptance ids")
+        red = None
+        if codegen and ph.get("needs_custom_orchestration"):
+            red = _run_phase_codegen(engine, ctx, repo_map, ph, carry)
+        if red is None:
+            red = ctx.run_phase(ph, carry_diff=carry, phase_index=pidx)
+        if red.get("accepted_full"):
+            engine.log("SOLVED (full suite) during phase " + str(ph.get("name")))
+            return red.get("candidate")
+        if red.get("phase_passed") and red.get("candidate") is not None:
+            ctx._checkpoint_phase(red["candidate"], subset_passed=red.get("phase_pass_count", 0),
+                                  subset_total=red.get("phase_total", 0),
+                                  phase_id=str(ph.get("name") or ""))
+            engine.log("phase " + str(ph.get("name")) + " DONE (" +
+                       str(red.get("phase_pass_count")) + "/" + str(red.get("phase_total")) + " gold ids)")
+        carry = red.get("merged_diff") or carry
+        # POST goal-alignment gate: did the phase output drift off the goal?
+        g2 = ctx.goal_align_gate(plan, ph, residual_ids=red.get("residual"), stage="post", n=n_gate)
+        if g2.get("verdict") == "abort":
+            ctx.defer("plan_abort", ph.get("name"), g2.get("reason") or "")
+            engine.log("goal-gate ABORT (post) phase=" + str(ph.get("name")) + ": " + str(g2.get("reason")))
+            break
+    return ctx.select(ctx.all_candidates())               # engine-owned; may be None (abstain)
+
+
 def autosolve(
     engine: Engine, *,
     source_repo: str,
@@ -577,26 +693,45 @@ def autosolve(
                             "fallback", True, [])
         return run_orchestration(BEST_OF_N_ORCHESTRATION, ctx), fw
 
-    try:
-        winner = run_orchestration(frozen.source, ctx)
-    except PlateauStop as exc:
-        # Backbone 2.1: a CLEAN governor stop (plateau/ceiling), not a defect. Select the
-        # best banked AUTHORED candidate (exclude the template floor -> autogen stands alone;
-        # the gated rescue below still applies).
-        engine.log(f"plateau-stop: {exc}; selecting best banked authored candidate")
-        winner = ctx.select([c for c in ctx.all_candidates() if c is not floor_cand])
-    except FailLoud as exc:
-        # lint/compile guard tripped -> fall open to the verified best-of-N floor
-        engine.log(f"frozen orchestration rejected ({exc}); failing open to best-of-N floor")
-        error = str(exc)
-        winner, frozen = _floor()
-    except Exception as exc:  # generated strategy crashed -> floor
-        engine.log(f"orchestration raised ({type(exc).__name__}: {exc}); failing open to floor")
-        error = f"{type(exc).__name__}: {exc}"
+    # HYBRID: the host-side Claude-Code-style phase planner runs FIRST (depth 0), then falls through
+    # to the frozen converge body when it abstains/degenerates. Gated by the selector + flag so the
+    # converge/template/baseline arms are byte-for-byte unchanged.
+    if (os.environ.get("APEX_OMEGA_PHASE_PLANNER") == "1"
+            and os.environ.get("APEX_OMEGA_ORCHESTRATION") == "hybrid"):
         try:
+            engine.phase("phase-plan")
+            pw = phase_planned_solve(engine, ctx, repo_map)
+            if pw is not None and getattr(pw, "accepted", False):
+                winner = pw
+        except PlateauStop as exc:
+            engine.log(f"phase planner plateau-stop: {exc}; selecting best banked candidate")
+            winner = ctx.select([c for c in ctx.all_candidates() if c is not floor_cand])
+        except Exception as exc:
+            engine.log(f"phase planner raised ({type(exc).__name__}: {exc}); falling through to converge")
+
+    if winner is not None and getattr(winner, "accepted", False):
+        pass   # the phase planner already produced a verified winner; skip the converge body
+    else:
+        try:
+            winner = run_orchestration(frozen.source, ctx)
+        except PlateauStop as exc:
+            # Backbone 2.1: a CLEAN governor stop (plateau/ceiling), not a defect. Select the
+            # best banked AUTHORED candidate (exclude the template floor -> autogen stands alone;
+            # the gated rescue below still applies).
+            engine.log(f"plateau-stop: {exc}; selecting best banked authored candidate")
+            winner = ctx.select([c for c in ctx.all_candidates() if c is not floor_cand])
+        except FailLoud as exc:
+            # lint/compile guard tripped -> fall open to the verified best-of-N floor
+            engine.log(f"frozen orchestration rejected ({exc}); failing open to best-of-N floor")
+            error = str(exc)
             winner, frozen = _floor()
-        except Exception as exc2:
-            error = f"{error}; floor also failed: {exc2}"
+        except Exception as exc:  # generated strategy crashed -> floor
+            engine.log(f"orchestration raised ({type(exc).__name__}: {exc}); failing open to floor")
+            error = f"{type(exc).__name__}: {exc}"
+            try:
+                winner, frozen = _floor()
+            except Exception as exc2:
+                error = f"{error}; floor also failed: {exc2}"
 
     # NOTE: there is deliberately NO "no-winner -> fall open to template" rescue here.
     # If the AUTHORED orchestration runs cleanly but produces no accepted winner (it

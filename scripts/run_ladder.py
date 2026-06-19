@@ -175,6 +175,36 @@ ARMS = [
                                   "--autogen-max-agents", _OMEGA_MAX],
                                  {"APEX_OMEGA_ORCHESTRATION": "converge",
                                   "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    # ===== PHASE-PLANNER A/B (the Claude-Code-style hybrid; offline-validated, live run user-driven) =====
+    # All three carry the SAME repair flips as omega_converge_unbounded so the ONLY variable is the
+    # orchestration shape (apples-to-apples). short labels match orchestration_research/DECISION.md.
+    #   A converge      (control/bar)  = the incumbent decompose->fan-out->reduce->loop-until-dry.
+    #   B hybrid        (treatment)    = host-side ordered phases + per-phase scoped converge +
+    #                                    partial-frontier checkpoint + adversarial goal-alignment gate.
+    #   C hybrid-nogate (ablation)     = B with the goal gate OFF (does the no-veer review earn its agents?).
+    #   D hybrid-codegen(ablation,opt) = B + per-phase generated orchestration (run ONLY if B/C plateau).
+    ("converge",      ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                       "--autogen-max-agents", _OMEGA_MAX],
+                      {"APEX_OMEGA_ORCHESTRATION": "converge",
+                       "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    ("hybrid",        ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                       "--autogen-max-agents", _OMEGA_MAX],
+                      {"APEX_OMEGA_ORCHESTRATION": "hybrid", "APEX_OMEGA_PHASE_PLANNER": "1",
+                       "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    ("hybrid-nogate", ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                       "--autogen-max-agents", _OMEGA_MAX],
+                      {"APEX_OMEGA_ORCHESTRATION": "hybrid", "APEX_OMEGA_PHASE_PLANNER": "1",
+                       "APEX_OMEGA_GOAL_GATE": "0",
+                       "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    ("hybrid-codegen", ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                        "--autogen-max-agents", _OMEGA_MAX],
+                       {"APEX_OMEGA_ORCHESTRATION": "hybrid", "APEX_OMEGA_PHASE_PLANNER": "1",
+                        "APEX_OMEGA_PHASE_CODEGEN": "1",
+                        "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    # ralph alias (short label matching the DECISION eval plan): vanilla persistence floor.
+    ("ralph",         ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                       "--autogen-max-agents", _OMEGA_MAX],
+                      {"APEX_OMEGA_ORCHESTRATION": "ralph", "APEX_OMEGA_REPAIR_ITERS": "200"}),
 ]
 # Default 4-repo comparison set. LADDER_REPOS (comma-separated commit0 target names) overrides it
 # for a custom sweep (e.g. a 12-15 repo breadth run); see apex_omega/eval/registry TARGET_NAMES.
@@ -277,6 +307,25 @@ def _recover_checkpoint(rundir: Path):
         except Exception:
             continue
     return None
+
+
+def _recover_partial_frontier(rundir: Path):
+    """Phase-planner addendum: surface the strongest PARTIAL/phase frontier banked to
+    phase_checkpoint.json. TELEMETRY ONLY — a partial is NEVER a solve (accepted is always False);
+    only accepted_checkpoint.json yields solved:1 (Cardinal Contract C7). Returns the best partial
+    record (highest gold_passed) or None. Lets a relaunch/audit see the off-by-K progress that
+    survived an outer kill without ever inflating the solve-rate."""
+    best = None
+    for p in list(rundir.rglob("phase_checkpoint.json")):
+        try:
+            d = json.loads(p.read_text())
+            if d.get("accepted"):          # defensive: a partial must never claim acceptance
+                continue
+            if best is None or int(d.get("gold_passed", 0) or 0) > int(best.get("gold_passed", 0) or 0):
+                best = d
+        except Exception:
+            continue
+    return best
 
 
 def _has_journal(rundir: Path) -> bool:
@@ -484,6 +533,10 @@ def run_cell(label: str, flags: list[str], repo: str, env_overlay: dict | None =
                     "indeterminate_total": fs.indeterminate_total,
                     "seconds_since_frontier_improved": fs.as_state()[
                         "seconds_since_frontier_improved"]}
+            _pf = _recover_partial_frontier(rundir)        # phase-planner PARTIAL banked (telemetry only)
+            if _pf:
+                base["partial_frontier"] = int(_pf.get("gold_passed", 0) or 0)
+                base["partial_frontier_total"] = int(_pf.get("gold_total", 0) or 0)
             if action == "plateau":
                 emit("plateau_cut", base)
             elif action == "harness":
@@ -503,6 +556,11 @@ def run_cell(label: str, flags: list[str], repo: str, env_overlay: dict | None =
             res.update({"solved": 1, "total": res.get("total") or 1, "pass_pct": 100.0,
                         "recovered_from_checkpoint": True, "candidate_id": ckpt.get("candidate_id"),
                         "_note": "verified accept recovered from checkpoint on clean completion"})
+        else:
+            _pf = _recover_partial_frontier(rundir)        # PARTIAL frontier (telemetry only; never a solve)
+            if _pf:
+                res["partial_frontier"] = int(_pf.get("gold_passed", 0) or 0)
+                res["partial_frontier_total"] = int(_pf.get("gold_total", 0) or 0)
     # Strip the bulky checkout immediately (only once a report exists, so a
     # report-less crash keeps its artifacts for debugging).
     if cell_done(rundir):

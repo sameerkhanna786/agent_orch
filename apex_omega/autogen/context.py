@@ -115,6 +115,58 @@ DECOMPOSE_SCHEMA = {
     },
 }
 
+# PHASE_PLAN_SCHEMA — ctx.plan_phases() reply contract: a Claude-Code-style ORDERED list of
+# phases (manageable chunks WITH objectives + per-phase acceptance), grouping the decompose
+# modules in dependency order. Each phase carries an `objective` (the chunk's goal), the union
+# of its modules' gold test ids as its `acceptance_gold_ids` (the per-phase acceptance predicate
+# — validated against the real gold inventory; hallucinated ids are dropped), `files_owned`
+# (delegation-contract boundaries), the constituent `modules`, and `depends_on`. A schema-miss /
+# <2 valid phases returns None (ctx.ask null terminal) -> the caller falls back to whole-repo
+# converge. This is the planner; acceptance stays engine-owned (a phase pass is a SUBSET of gold
+# ids green, NEVER an accept — only ctx.select on the full suite accepts).
+PHASE_PLAN_SCHEMA = {
+    "type": "object",
+    "required": ["phases"],
+    "properties": {
+        "phases": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["objective", "acceptance_gold_ids"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "acceptance_gold_ids": {"type": "array", "items": {"type": "string"}},
+                    "files_owned": {"type": "array", "items": {"type": "string"}},
+                    "depends_on": {"type": "array", "items": {"type": "string"}},
+                    "modules": {"type": "array", "items": {"type": "string"}},
+                    # OPTIONAL: the planner may flag a phase as needing a bespoke per-phase
+                    # orchestration script (the user's "generate code per phase"); honored only
+                    # when APEX_OMEGA_PHASE_CODEGEN=1 (default OFF).
+                    "needs_custom_orchestration": {"type": "boolean"},
+                },
+            },
+        },
+    },
+}
+
+# GATE_SCHEMA — ctx.goal_align_gate() per-skeptic reply contract: the adversarial GOAL-ALIGNMENT
+# review that keeps a long phased run from VEERING off the goal. A skeptic returns proceed/revise/
+# abort; a revise/abort MUST cite `evidence_ids` that are REAL failing gold node-ids (grounding it
+# in execution reality, not the transcript — the moat over a transcript-only verifier). An
+# ungrounded verdict is DOWNGRADED to proceed. read-only SIGNAL: it can re-target or stop the phase
+# loop but can NEVER set acceptance (Cardinal Contract).
+GATE_SCHEMA = {
+    "type": "object",
+    "required": ["verdict"],
+    "properties": {
+        "verdict": {"type": "string", "enum": ["proceed", "revise", "abort"]},
+        "reason": {"type": "string"},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "retarget_gold_ids": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
 # SANDBOX-NOT-PROMPT POLICY (user directive 2026-06-16): we do NOT limit the model via
 # prompts and we do NOT penalize/kill an attempt for trying to fetch/cheat. The CORRECTNESS
 # BOUNDARY is structural — the worktree's source SHADOWS any site-packages install (cwd for
@@ -297,6 +349,9 @@ class OrchestrationContext:
         self._halt_is_cut = False
         self._halted = False
         self._all_candidates: list = []
+        # the most recent full-suite residual failing node-ids (set by reduce_residuals); the
+        # phase planner's goal-alignment gate grounds its skeptics in this REAL failing set.
+        self._last_residual: list = []
         # IOU / blocked-on ledger (ctx.defer): a structured deferral sentinel (the paradigm's
         # todo!("blocked_on: X::Y")) so a bounded loop can record an unresolved item and TERMINATE,
         # handing it to a downstream phase instead of spinning or dropping it silently.
@@ -391,6 +446,41 @@ class OrchestrationContext:
         except Exception:
             pass
 
+    def _checkpoint_phase(self, cand, *, subset_passed: int, subset_total: int,
+                          phase_id: str = "") -> None:
+        """Bank a PARTIAL/phase frontier gain to disk the instant it appears, so an outer
+        subprocess kill cannot discard the work-in-progress (the phased analogue of
+        _checkpoint_accepted). Writes <run_dir>/phase_checkpoint.json — a SEPARATE file from
+        accepted_checkpoint.json so a partial is NEVER reported solved:1 (Cardinal Contract C7);
+        run_ladder surfaces it as partial_frontier telemetry only. MONOTONE: overwrites only on a
+        STRICT gold-pass-COUNT rise. Atomic temp-write + replace. accepted is always False here —
+        only the engine-owned whole-suite ctx.select accepts. Best-effort, never fatal."""
+        try:
+            if cand is None:
+                return
+            import json as _json
+            p = Path(self._engine.run_dir) / "phase_checkpoint.json"
+            prev = -1
+            if p.exists():
+                try:
+                    prev = int(_json.loads(p.read_text()).get("gold_passed", -1))
+                except Exception:
+                    prev = -1
+            if int(subset_passed) <= prev:
+                return   # monotone: bank only a strict frontier rise
+            rec = {"accepted": False, "gold_passed": int(subset_passed),
+                   "gold_total": int(subset_total),
+                   "candidate_id": getattr(cand, "candidate_id", ""),
+                   "content_sha": getattr(cand, "content_sha", ""),
+                   "pass_rate": getattr(cand, "public_signal_score", 0.0),
+                   "phase_id": str(phase_id or ""),
+                   "repo": self.repo_map.get("repo") or self.repo_map.get("source_repo")}
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps(rec))
+            tmp.replace(p)
+        except Exception:
+            pass
+
     # ---- escape/cheat telemetry (record, never penalize) ----
     def _record_integrity(self, attempt_id: str, vendor: str, integ: dict) -> None:
         """Append escape/cheat telemetry to ``integrity_log.jsonl`` (best-effort, NEVER fatal).
@@ -439,6 +529,7 @@ class OrchestrationContext:
         # detector state is faithfully reconstructed during a resume replay) ---
         round_gold = self._best_gold_passed
         round_pass = self._best_pass_rate
+        frontier_cand = None     # the candidate that pushed the gold frontier up this batch
         n_attempts = len(out)
         n_nonresult = 0          # attempts that produced no usable work
         n_sterile = 0            # attempts with an empty diff OR a diff already seen this run
@@ -458,6 +549,7 @@ class OrchestrationContext:
             pr = pr if (isinstance(pr, (int, float)) and not isinstance(pr, bool)) else 0.0
             if gp > round_gold:
                 round_gold = gp
+                frontier_cand = c
             if pr > round_pass:
                 round_pass = pr
             # SPFG+ valid-measurement filter: a candidate contributes to the FRONTIER and to the
@@ -495,6 +587,13 @@ class OrchestrationContext:
             # record a STRICT gold-count rise in the frontier history (telemetry / ledger).
             if round_gold > self._best_gold_passed:
                 self._frontier_history.append((self._valid_measurements, int(round_gold)))
+                # ACCEPTANCE-CHECKPOINT the PARTIAL frontier the instant it rises, so an outer
+                # kill never discards the work-in-progress (telemetry-only; never a solve, C7).
+                if frontier_cand is not None:
+                    self._checkpoint_phase(
+                        frontier_cand, subset_passed=int(round_gold),
+                        subset_total=int((getattr(frontier_cand, "meta", {}) or {}).get("gold_total", 0) or 0),
+                        phase_id="frontier")
             self._best_gold_passed = round_gold
             self._best_pass_rate = round_pass
             self._dry_rounds = 0
@@ -1199,9 +1298,241 @@ class OrchestrationContext:
             return chosen
         return None
 
+    def last_residual(self) -> list:
+        """The most recent full-suite residual failing node-ids (set by reduce_residuals), used to
+        GROUND the goal-alignment gate's skeptics in execution reality. Falls back to the best
+        candidate's failing ids when no reduce has run yet. Read-only; no agent."""
+        return list(self._last_residual) if self._last_residual else self.residual_failures()
+
+    # ---- Claude-Code-style PHASED planning (host-side; acceptance stays engine-owned) ----
+    def plan_phases(self, *, plan: dict, max_phases: int, vendor: Optional[str] = None,
+                    model: Optional[str] = None, agent_id: int = 700200) -> Optional[list]:
+        """ONE read-only planner subagent (ctx.ask, PHASE_PLAN_SCHEMA, FIXED agent_id 700200 —
+        disjoint from decompose 700100): group the decompose ``plan`` modules into <= max_phases
+        ORDERED phases (manageable chunks WITH objectives + per-phase acceptance), in dependency
+        order. Each phase's acceptance_gold_ids are VALIDATED against the real gold inventory (the
+        union of the plan's module gold ids); hallucinated ids are dropped and, if a phase is left
+        empty, its constituent modules' gold ids are substituted. Persists phase_plan.json (durable
+        like ~/.claude/plans — re-read, not re-planned, on resume). FAIL-OPEN: schema-miss / < 2
+        valid phases -> None (caller falls through to whole-repo converge)."""
+        import json as _json
+        pp = Path(self._engine.run_dir) / "phase_plan.json"
+        if pp.exists():                                  # resume: re-read, never re-plan
+            try:
+                saved = _json.loads(pp.read_text())
+                if isinstance(saved, list) and len(saved) >= 2:
+                    return saved
+            except Exception:
+                pass
+        modules = [m for m in ((plan or {}).get("modules") or []) if isinstance(m, dict) and m.get("module")]
+        if len(modules) < 2:
+            return None
+        inventory = set(self.module_gold_ids(modules))
+        gold_by_mod = {str(m.get("module")): [str(i) for i in (m.get("gold_test_ids") or [])]
+                       for m in modules}
+        order = [str(o) for o in ((plan or {}).get("order") or [])] or list(gold_by_mod)
+        mod_brief = [{"module": str(m.get("module")), "depends_on": list(m.get("depends_on") or []),
+                      "n_gold_tests": len(m.get("gold_test_ids") or []),
+                      "files": list(m.get("files") or [])[:8]} for m in modules]
+        goal = str((self.repo_map or {}).get("task_framing")
+                   or (self.repo_map or {}).get("approach") or "")[:1500]
+        prompt = (
+            "You are PLANNING a repository-completion task the way a senior engineer breaks a large "
+            "job into an ORDERED set of manageable phases, each with a clear objective and a concrete "
+            "acceptance criterion. Do NOT write code. Group the modules below into AT MOST "
+            + str(int(max_phases)) + " phases, ordered so each phase only depends on earlier ones. "
+            "MERGE thin/tightly-coupled modules into one phase — do not over-split. For each phase "
+            "return: name, objective (what this phase delivers), modules (the module names it covers), "
+            "acceptance_gold_ids (the union of those modules' gold_test_ids — the exact tests that "
+            "must be green for the phase to be DONE), files_owned (the files this phase may edit), and "
+            "depends_on (earlier phase names).\n\n"
+            + ("OVERALL GOAL:\n" + goal + "\n\n" if goal else "")
+            + "MODULES (from decomposition):\n" + _json.dumps(mod_brief, indent=1)[:4000]
+            + "\n\nTOPOLOGICAL MODULE ORDER: " + _json.dumps(order)[:1500]
+            + "\n\nReturn ONLY the JSON object matching the required schema."
+        )
+        reply = self.ask(prompt, schema=PHASE_PLAN_SCHEMA, vendor=vendor, model=model,
+                         agent_id=agent_id, max_nudges=2, phase="plan", label="phase-plan",
+                         agent_type="planner")
+        raw = reply.get("phases") if isinstance(reply, dict) else None
+        if not raw:
+            return None
+        cleaned: list = []
+        for ph in raw:
+            if not isinstance(ph, dict):
+                continue
+            mods_in = [str(x) for x in (ph.get("modules") or []) if str(x) in gold_by_mod]
+            ids = [str(i) for i in (ph.get("acceptance_gold_ids") or []) if str(i) in inventory]
+            if not ids:                                  # planner omitted/hallucinated -> derive
+                ids = sorted({i for mm in mods_in for i in gold_by_mod.get(mm, [])})
+            if not ids and not mods_in:
+                continue
+            cleaned.append({
+                "name": str(ph.get("name") or ("phase%d" % (len(cleaned) + 1))),
+                "objective": str(ph.get("objective") or "")[:600],
+                "acceptance_gold_ids": ids,
+                "files_owned": [str(f) for f in (ph.get("files_owned") or [])][:40],
+                "modules": mods_in,
+                "depends_on": [str(d) for d in (ph.get("depends_on") or [])],
+                "needs_custom_orchestration": bool(ph.get("needs_custom_orchestration")),
+            })
+        if len(cleaned) < 2:
+            return None
+        if len(cleaned) > int(max_phases):               # never orphan ids: fold the tail into one
+            head, tail = cleaned[:int(max_phases) - 1], cleaned[int(max_phases) - 1:]
+            merged = {"name": "phase_final",
+                      "objective": "; ".join(t["objective"] for t in tail if t["objective"])[:600],
+                      "acceptance_gold_ids": sorted({i for t in tail for i in t["acceptance_gold_ids"]}),
+                      "files_owned": sorted({f for t in tail for f in t["files_owned"]}),
+                      "modules": sorted({m for t in tail for m in t["modules"]}),
+                      "depends_on": [], "needs_custom_orchestration": False}
+            cleaned = head + [merged]
+        try:
+            tmp = pp.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps(cleaned))
+            tmp.replace(pp)
+        except Exception:
+            pass
+        return cleaned
+
+    def run_phase(self, phase: dict, *, carry_diff: str = "", phase_index: int = 0) -> dict:
+        """Run the PROVEN converge inner loop (fanout_modules -> reduce_residuals -> loop-until-dry)
+        for ONE phase, SCOPED to phase['acceptance_gold_ids'] via reduce_residuals(scope_ids=...).
+        Each module agent gets the delegation contract (objective + files_owned + acceptance ids).
+        Stop authority is should_continue_waves() (the SPFG+ governor) — NO new stop logic. Returns
+        {merged_diff, residual, phase_passed, phase_pass_count, phase_total, accepted_full,
+        candidate, conflicts}. A phase whose modules don't resolve degrades to a scoped repair loop
+        on the carry; every path keeps acceptance engine-owned (only ctx.select on the full suite
+        accepts).
+
+        ``phase_index`` namespaces this phase's attempt ids (fan-out + repair) into a DISJOINT band
+        so calling run_phase once per phase never collides on the journal/worktree ids — a same-id
+        second phase would otherwise replay the FIRST phase's cached fan-out (the cross-phase cache
+        collision bug)."""
+        decomp = (self.repo_map or {}).get("decomposition") or {}
+        by_name = {str(m.get("module")): m for m in (decomp.get("modules") or [])
+                   if isinstance(m, dict) and m.get("module")}
+        names = [str(n) for n in (phase or {}).get("modules") or []]
+        mods = [by_name[n] for n in names if n in by_name]
+        scope_ids = [str(i) for i in (phase or {}).get("acceptance_gold_ids") or []]
+        scope_set = set(scope_ids)
+        objective = str((phase or {}).get("objective") or "")
+        files_owned = [str(f) for f in (phase or {}).get("files_owned") or []]
+        contract = (
+            "PHASE OBJECTIVE: " + (objective or "(complete the scoped tests)") + "\n"
+            + ("FILES THIS PHASE OWNS (stay within these; do not edit other phases' files): "
+               + ", ".join(files_owned[:40]) + "\n" if files_owned else "")
+            + "Earlier phases are already implemented in this workspace — BUILD ON them, do not revert.\n"
+        )
+        # per-phase disjoint id bands (fan-out 734xxx..., repair 711xxx...) so phase N never
+        # cache-replays phase N-1's attempts.
+        pidx = max(0, int(phase_index))
+        fan_base = 734000 + pidx * 4000
+        rep_base = 711000 + pidx * 4000
+        carry = carry_diff
+        if mods:
+            cands = self.fanout_modules(mods, carry_diff=carry, extra_brief=contract, id_base=fan_base)
+            red = self.reduce_residuals(cands, carry_diff=carry, scope_ids=scope_ids)
+        else:
+            # no resolvable modules -> scoped residual repair seeded by the carry
+            c = self.repair_residual(scope_ids or self.last_residual(), carry_diff=carry,
+                                     attempt_id=rep_base, round=0)
+            red = self.reduce_residuals([c], carry_diff=carry, scope_ids=scope_ids)
+        if red.get("merged_diff"):
+            carry = red["merged_diff"]
+        rnd = 1
+        while (self.should_continue_waves() and not red.get("accepted")
+               and not red.get("phase_passed")):
+            residual = [r for r in (red.get("residual_failing_ids") or []) if r in scope_set] or scope_ids
+            c = self.repair_residual(residual, carry_diff=carry, attempt_id=rep_base + rnd, round=rnd)
+            rnd += 1
+            red = self.reduce_residuals([c], carry_diff=carry, scope_ids=scope_ids)
+            if red.get("merged_diff"):
+                carry = red["merged_diff"]
+        return {
+            "merged_diff": carry, "residual": list(red.get("residual_failing_ids") or []),
+            "phase_passed": bool(red.get("phase_passed")),
+            "phase_pass_count": int(red.get("phase_pass_count", 0) or 0),
+            "phase_total": int(red.get("phase_total", len(scope_ids)) or 0),
+            "accepted_full": bool(red.get("accepted")),
+            "candidate": red.get("candidate"), "conflicts": list(red.get("conflicts") or []),
+        }
+
+    def goal_align_gate(self, plan: dict, phase: dict, *, residual_ids: Sequence[str],
+                        stage: str, n: int = 3) -> dict:
+        """Adversarial GOAL-ALIGNMENT review (the no-veer guard). N read-only skeptics via
+        ctx.signals (no plateau accounting) each judge whether THIS phase still serves the overall
+        goal G, GROUNDED in the REAL residual failing node-ids R (not the transcript — the moat over
+        a transcript-only verifier). A revise/abort verdict MUST cite evidence_ids that are real
+        failing ids, else it is DOWNGRADED to proceed. Grounded-majority decides; ties / no grounded
+        dissent -> proceed (fail-open: the gate can STOP a veer, never stall a progressing run). A
+        read-only SIGNAL: it can re-target (revise) or stop the phase loop (abort) but NEVER sets
+        acceptance (C7). Off when APEX_OMEGA_GOAL_GATE=0. Returns {verdict, reason, evidence_ids,
+        retarget_gold_ids}."""
+        if os.environ.get("APEX_OMEGA_GOAL_GATE", "1") == "0":
+            return {"verdict": "proceed", "reason": "gate disabled", "evidence_ids": [],
+                    "retarget_gold_ids": []}
+        import json as _json
+        from ..journal.key import sha256_hex
+        rid = [str(x) for x in (residual_ids or [])]
+        rid_set = set(rid)
+        goal = str((self.repo_map or {}).get("task_framing")
+                   or (self.repo_map or {}).get("approach") or "")[:1500]
+        obj = str((phase or {}).get("objective") or "")
+        acc = [str(i) for i in (phase or {}).get("acceptance_gold_ids") or []]
+        inventory = set(self.module_gold_ids((plan or {}).get("modules") or [])) or rid_set
+        base = 700400 + int(sha256_hex(str(stage) + "|" + str((phase or {}).get("name") or ""))[:6], 16) % 80000
+        nn = max(1, int(n))
+
+        def _mk(i):
+            return lambda i=i: self.ask(
+                "You are an ADVERSARIAL reviewer guarding a long multi-phase run from VEERING off "
+                "its goal. Decide if the current phase still serves the goal.\n\n"
+                + ("OVERALL GOAL (binding):\n" + goal + "\n\n" if goal else "")
+                + "CURRENT PHASE (" + str(stage) + "-check): " + (obj or "(scoped tests)") + "\n"
+                + "PHASE ACCEPTANCE GOLD IDS: " + _json.dumps(acc[:40]) + "\n"
+                + "REAL STILL-FAILING TEST NODE-IDS (the only admissible evidence): "
+                + _json.dumps(rid[:60]) + "\n\n"
+                + "Return JSON {verdict: proceed|revise|abort, reason, evidence_ids, "
+                + "retarget_gold_ids}. Rules: 'proceed' if the phase is on-goal and making sense. "
+                + "'revise' only if the acceptance ids are mis-scoped — put the CORRECT gold ids in "
+                + "retarget_gold_ids. 'abort' only if the phase cannot serve the goal. ANY revise/"
+                + "abort MUST cite evidence_ids drawn from the real failing node-ids above; with no "
+                + "such evidence, return 'proceed'.",
+                schema=GATE_SCHEMA, agent_id=base + i, max_nudges=1,
+                phase="goal-gate", label="gate:" + str(stage), agent_type="goal_gate")
+
+        replies = self.signals([_mk(i) for i in range(nn)])
+        votes = {"proceed": 0, "revise": 0, "abort": 0}
+        retarget: set = set()
+        reasons: list = []
+        for r in replies:
+            if not isinstance(r, dict):
+                continue
+            v = str(r.get("verdict") or "proceed")
+            ev = [str(x) for x in (r.get("evidence_ids") or [])]
+            grounded = bool(rid_set) and any(e in rid_set for e in ev)
+            if v in ("revise", "abort") and not grounded:
+                v = "proceed"        # DOWNGRADE an ungrounded dissent (anti-hallucination)
+            votes[v] = votes.get(v, 0) + 1
+            if v != "proceed" and r.get("reason"):
+                reasons.append(str(r.get("reason"))[:200])
+            if v == "revise":
+                retarget |= {str(i) for i in (r.get("retarget_gold_ids") or []) if str(i) in inventory}
+        # grounded-majority: abort needs a strict majority; else revise on a strict majority; else proceed.
+        if votes["abort"] > nn / 2.0:
+            verdict = "abort"
+        elif votes["revise"] > nn / 2.0:
+            verdict = "revise"
+        else:
+            verdict = "proceed"
+        return {"verdict": verdict, "reason": "; ".join(reasons)[:400],
+                "evidence_ids": rid[:20], "retarget_gold_ids": sorted(retarget)}
+
     def solve_module(self, module: dict, *, carry_diff: str = "", attempt_id: Optional[int] = None,
                      vendor: Optional[str] = None, model: Optional[str] = None,
-                     strategy: str = "module", prompt: Optional[str] = None) -> Optional[Candidate]:
+                     strategy: str = "module", prompt: Optional[str] = None,
+                     extra_brief: str = "") -> Optional[Candidate]:
         """Run ONE module-scoped solve agent, seeded with the carry-forward diff applied into the
         fresh worktree BEFORE the agent edits. The agent is briefed to implement ONLY this module
         and make its gold-test subset pass; it is still scored on the FULL gold suite (the accept
@@ -1237,6 +1568,11 @@ class OrchestrationContext:
                 + carry_note
                 + "Run the scoped subset and iterate until that subset is green.\n"
             )
+        # DELEGATION CONTRACT (graft, fact-checked: detailed objective + boundaries cure the
+        # vague-delegation duplicate-work/gap failure). A phase-level objective + file-ownership
+        # boundary, appended to whichever brief produced ``prompt``. Fail-open: absent -> no-op.
+        if extra_brief and prompt:
+            prompt = prompt + "\n\n--- PHASE DELEGATION CONTRACT ---\n" + str(extra_brief) + "\n"
         return self._attempt(
             aid=aid, prefix="m", node_prefix="module", prompt=prompt, strategy=strategy,
             vendor=vendor, model=model, pre_apply_diff=carry_diff,
@@ -1245,7 +1581,7 @@ class OrchestrationContext:
         )
 
     def fanout_modules(self, modules: Sequence[dict], *, carry_diff: str = "",
-                       id_base: int = 730000) -> list:
+                       id_base: int = 730000, extra_brief: str = "") -> list:
         """FAN-OUT per module via ctx.pipeline (no barrier, guide §4.1): each module is its own
         streaming chain, so a fast module never waits on a slow sibling. Each chain runs ONE
         module-scoped solve agent seeded with ``carry_diff``. Returns the per-module Candidate
@@ -1263,16 +1599,22 @@ class OrchestrationContext:
             return []
 
         def _solve_stage(_prev, module, index):
-            cand = self.solve_module(module, carry_diff=carry_diff, attempt_id=id_base + index)
+            cand = self.solve_module(module, carry_diff=carry_diff, attempt_id=id_base + index,
+                                     extra_brief=extra_brief)
             # forward only the JSON-safe candidate-id (the live Candidate stays in _all_candidates)
             return cand.candidate_id if cand is not None else ""
 
-        ids = self.pipeline(list(mods), _solve_stage)
+        # Key the pipeline's stage journal on id_base + module name (NOT the bare item index). The
+        # engine pipeline defaults a dict item's id to its INDEX, so two fanout_modules calls in the
+        # same run (e.g. the phase planner's per-phase fan-outs) would collide on "0:_solve_stage"
+        # and the second phase would cache-replay the first. id_base is disjoint per phase -> unique.
+        ids = self.pipeline(list(mods), _solve_stage,
+                            item_id=lambda m: f"{id_base}_{(m or {}).get('module', 'm')}")
         by_id = {c.candidate_id: c for c in self._all_candidates if c is not None}
         return [by_id[i] for i in ids if i and i in by_id]
 
     def reduce_residuals(self, candidates: Sequence[Optional[Candidate]], *,
-                         carry_diff: str = "") -> dict:
+                         carry_diff: str = "", scope_ids: Optional[Sequence[str]] = None) -> dict:
         """REDUCE step — plain Python, NO LLM, zero tokens. Merge the per-module candidate diffs
         into ONE worktree (carry_diff first, then each candidate's diff in the order given), run
         the FULL gold suite ONCE, and return the exact residual failing node-ids.
@@ -1284,7 +1626,14 @@ class OrchestrationContext:
         here): recorded as ``__carry__`` and the merge proceeds from the bare base.
 
         Returns {"merged_diff", "residual_failing_ids", "accepted", "candidate", "conflicts",
-        "indeterminate"}. NEVER raises on conflict."""
+        "indeterminate"}. NEVER raises on conflict.
+
+        ``scope_ids`` (graft from the phased planner): when given, ALSO report whether THIS phase's
+        acceptance gold-id subset is fully green — as a PURE SET TEST over the full-suite
+        ``residual_failing_ids`` the merge already computed (NO second pytest run, strictly cheaper
+        than a subset re-score). Adds ``{phase_passed, phase_pass_count, phase_total}``. The
+        WHOLE-suite ``accepted`` field and its checkpoint are UNCHANGED — only ctx.select on the full
+        suite ever accepts (C7). Default None == today's behaviour."""
         cands = [c for c in candidates if c is not None]
         conflicts: list = []
         indeterminate = False
@@ -1342,13 +1691,25 @@ class OrchestrationContext:
             self._observe([cand])
             if cand.accepted:
                 self._checkpoint_accepted(cand)
-            return {"merged_diff": merged_diff, "residual_failing_ids": list(vr.failing_nodeids),
-                    "accepted": bool(cand.accepted), "candidate": cand,
-                    # gold_passed lets the orchestrator distinguish a CLIMBING partial (enter
-                    # loop-until-dry) from a TOTAL collapse (route to SELECT/best-of-N), so a
-                    # majority-conflict merge that still made progress is not thrown to best-of-N.
-                    "gold_passed": int(getattr(vr, "passed", 0) or 0),
-                    "conflicts": list(conflicts), "indeterminate": bool(indeterminate or vr.indeterminate)}
+            self._last_residual = list(vr.failing_nodeids)
+            result = {"merged_diff": merged_diff, "residual_failing_ids": list(vr.failing_nodeids),
+                      "accepted": bool(cand.accepted), "candidate": cand,
+                      # gold_passed lets the orchestrator distinguish a CLIMBING partial (enter
+                      # loop-until-dry) from a TOTAL collapse (route to SELECT/best-of-N), so a
+                      # majority-conflict merge that still made progress is not thrown to best-of-N.
+                      "gold_passed": int(getattr(vr, "passed", 0) or 0),
+                      "conflicts": list(conflicts), "indeterminate": bool(indeterminate or vr.indeterminate)}
+            if scope_ids is not None:
+                # PURE SET TEST over the already-run full-suite score (no second pytest): a phase
+                # passes iff ALL its acceptance gold ids are absent from the failing set AND the
+                # measurement was VALID (a collection error / indeterminate never fakes a pass).
+                sids = [str(s) for s in scope_ids]
+                failing_set = {str(x) for x in vr.failing_nodeids}
+                green = [s for s in sids if s not in failing_set]
+                result["phase_total"] = len(sids)
+                result["phase_pass_count"] = len(green)
+                result["phase_passed"] = bool(sids and len(green) == len(sids) and not vr.indeterminate)
+            return result
         finally:
             self._provider.release(handle, confirm_patch_extracted=True)
 
