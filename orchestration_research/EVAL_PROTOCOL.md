@@ -20,18 +20,30 @@ All three carry identical repair flips (`REPAIR_ITERS=2`, `REPAIR_EXCERPTS=1`), 
 variable is the orchestration shape. `APEX_OMEGA_SKIP_AUTH_PREFLIGHT=1` (the pilot's auth-preflight
 race must not contaminate cells).
 
-## Repos
-- **Hard discriminators (where the hypothesis lives):** `mimesis` (6159-test near-solve repo, the
-  run-4 lost-solve victim), `babel` (4598/4607 near-solve).
-- **Controls:** `jinja` (medium; the historical single discriminator), `voluptuous` (easy;
-  no-regression — `hybrid` MUST hit the skip-gate and run the identical cheap path as `converge`).
+## Repos (AMENDED 2026-06-19, pre-data — expanded hard set for more discriminating power)
+- **Hard discriminators (where the hypothesis lives):** `mimesis` (6159-test near-solve), `babel`
+  (4598/4607 near-solve), **`pydantic`** (~95-100 files / ~5091 tests — the confirmed ceiling, never
+  solved; a FRONTIER-metric test of whether phasing makes progress where monolithic can't),
+  **`minitorch`** (modular by construction operators→tensors→autodiff→nn; a known climbing-frontier
+  repo — the IDEAL dependency-ordered-phasing discriminator), **`networkx`** (large modular graph
+  lib — included iff `scripts/verify_prep.py` confirms it preps locally; dropped if it needs Docker).
+- **Controls:** `jinja` (medium; historical discriminator), `voluptuous` (easy; no-regression —
+  `hybrid` MUST hit the skip-gate and run the identical cheap path as `converge`).
 
-## Replication & budget
-- **n = 3 seeds** per (arm × repo) → 36 cells. (Report's stated minimum for a claim; n=1 cannot rank
-  arms. n=5 on the discriminators is the pre-registered extension if the n=3 direction is positive.)
-- Wall `LADDER_CELL_TIMEOUT=10800` (3h/cell), `LADDER_MAX_RELAUNCH=1`, concurrency 2. Safe to clip:
-  acceptance-checkpointing banks any verified solve the instant it passes; partial frontiers are
-  recovered. Paired, seed-major; resumable.
+## Replication & budget (AMENDED — fast-mode codex + max parallelism, per user directive)
+- **n = 3 seeds** per (arm × repo) → up to ~63 cells (7 repos × 3 arms × 3 seeds). Paired,
+  seed-major, resumable. n=5 on the discriminators is the pre-registered extension if positive.
+- **FAST-MODE codex (uniform across ALL arms — fairness preserved):** `APEX_CODEX_EFFORT_EDIT=medium`
+  (down from the xhigh default) + `APEX_CODEX_EFFORT_READONLY=low` (down from high), pinned via the
+  codex `-c model_reasoning_effort=`. This is a large per-rollout speedup; applied identically to
+  every arm so the hybrid-vs-converge COMPARISON stays valid (it measures the comparison at a faster,
+  lower-effort capability tier).
+- **Max parallelism:** `LADDER_CONCURRENCY=8` (validated headroom: 14 cores, ~36 GB free, codex
+  ~147 MB/proc network-bound, 63% idle CPU at C=6). Outcome-neutral: omega arms are unbounded and
+  the governor stops on a wall-INDEPENDENT attempt-based plateau, so running more cells at once does
+  not change any single cell's result — only resource starvation could, which the headroom precludes.
+- Wall `LADDER_CELL_TIMEOUT=10800` (3h/cell), `LADDER_MAX_RELAUNCH=1`. Safe to clip:
+  acceptance-checkpointing banks any verified solve the instant it passes; partial frontiers recovered.
 
 ## Outcomes
 - **Primary (binary):** per-cell SOLVE = execution-accepted full-suite pass (C7: a winner with
@@ -67,6 +79,13 @@ failure.
   pure cost → stays flag-gated, default OFF (honest negative result).
 
 ## Threats to validity (acknowledged up front)
+- **Fast-mode capability tier (the speed↔accuracy tradeoff):** lowering codex reasoning effort
+  (xhigh→medium edits) makes each rollout much faster but reduces per-attempt coding capability, so
+  absolute solve-rates on the hardest repos may drop and some hard cells may all-fail — REDUCING
+  discrimination. This is uniform across arms (the comparison stays fair) but it measures the
+  hybrid-vs-converge effect at a lower capability tier than the xhigh default. If the hard repos go
+  all-fail, the continuous frontier endpoint still discriminates; if even that flattens, a
+  higher-effort confirmatory run on the winning direction is the pre-registered follow-up.
 - **Low power:** with n=3 and rare full solves, McNemar on binary solves may have few discordant
   pairs → underpowered; the continuous frontier endpoint mitigates this.
 - **Stochasticity:** agent runs are non-deterministic; seeds capture it but n=3 is small.
