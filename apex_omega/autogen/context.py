@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
@@ -32,6 +33,57 @@ from ..types import ScopedTask
 # Strategy hints cycled across attempts to preserve diversity (decorrelates
 # hallucinations — the whole reason best-of-N works).
 DEFAULT_STRATEGIES = ("minimal", "comprehensive", "test_driven", "edge_case_hardening")
+
+# Harness scaffolding that the read-jail launcher writes into EVERY per-rollout worktree (e.g.
+# `.apex_seatbelt/read_jail.sb`, the seatbelt profile). It is NOT part of any solution: it bloats
+# the candidate patch and, being a per-worktree byte-divergent NEW file, turns a genuinely-disjoint
+# module merge into a SPURIOUS 3-way conflict (it caused real cross-module conflicts in the jinja
+# reduce collapse). Excluded at diff extraction (_merged_diff here; _git_diff in the executor) and
+# defensively stripped from any already-cached diff before it is applied in reduce_residuals.
+_SCAFFOLD_PREFIXES = (".apex_seatbelt/",)
+# git pathspec form: keep everything under `.` EXCEPT the scaffolding dirs.
+_SCAFFOLD_PATHSPEC = ("--", ".") + tuple(f":(exclude){p}" for p in _SCAFFOLD_PREFIXES)
+
+
+def _diff_touched_paths(diff: str) -> set:
+    """The set of target paths a unified diff edits (from its ``+++ b/<path>`` lines). Pure;
+    used to DETECT competing whole-repo candidates (fan-out non-disjointness)."""
+    paths = set()
+    for line in (diff or "").splitlines():
+        if line.startswith("+++ "):
+            p = line[4:].strip()
+            if p.startswith("b/"):
+                p = p[2:]
+            if p and p != "/dev/null":
+                paths.add(p)
+    return paths
+
+
+def _strip_scaffold_hunks(diff: str) -> str:
+    """Drop the per-file sections of a unified diff that target harness scaffolding
+    (``_SCAFFOLD_PREFIXES``). Pure string transform that preserves diff framing; handles both the
+    ``git diff`` form (``diff --git`` headers) and the minimal ``--- a/ / +++ b/`` form. So a
+    cached candidate diff that already captured ``.apex_seatbelt/`` cannot torpedo a disjoint
+    merge in reduce_residuals."""
+    if not diff or not diff.strip():
+        return diff
+    delim = r"(?m)(?=^diff --git )" if "diff --git " in diff else r"(?m)(?=^--- )"
+    out = []
+    for block in re.split(delim, diff):
+        if not block:
+            continue
+        tgt = ""
+        for line in block.splitlines():
+            if line.startswith("+++ "):
+                tgt = line[4:].strip()
+                if tgt.startswith("b/"):
+                    tgt = tgt[2:]
+                break
+        if tgt and any(tgt.startswith(p) for p in _SCAFFOLD_PREFIXES):
+            continue
+        out.append(block)
+    return "".join(out)
+
 
 # DECOMPOSE_SCHEMA — the read-only schema'd reply contract for ctx.decompose(): a module
 # breakdown of the repo (module name -> the gold test ids that module must turn green +
@@ -52,6 +104,10 @@ DECOMPOSE_SCHEMA = {
                     "module": {"type": "string"},
                     "gold_test_ids": {"type": "array", "items": {"type": "string"}},
                     "depends_on": {"type": "array", "items": {"type": "string"}},
+                    # OPTIONAL (advisory): the disjoint slice of files this module owns. Lets the
+                    # convergence default DETECT (not assume) fan-out disjointness; absent -> the
+                    # plan is fail-open compatible (older plans / a model that omits it still work).
+                    "files": {"type": "array", "items": {"type": "string"}},
                 },
             },
         },
@@ -1058,6 +1114,44 @@ class OrchestrationContext:
                 best = c
         return (best.diff or "") if best is not None else ""
 
+    def module_gold_ids(self, modules: Sequence[dict]) -> list:
+        """Union of the per-module ``gold_test_ids`` from a decompose plan — a concrete, pure
+        repair target for loop-until-dry when the merged tree ERRORS at collection (so
+        ``failing_nodeids`` is empty and the old ``and residual`` guard would never engage repair).
+        No LLM call; deterministic over the journaled plan."""
+        out: set = set()
+        for m in (modules or []):
+            for i in ((m or {}).get("gold_test_ids") or []):
+                out.add(str(i))
+        return sorted(out)
+
+    def modules_overlap(self, candidates: Sequence[Optional[Candidate]], *,
+                        threshold: float = 0.5) -> bool:
+        """DETECT (not assume) the competing-WHOLE-REPO-candidate case: True when any two VALID
+        candidate diffs touch a substantially overlapping path set (Jaccard >= ``threshold``). The
+        independence the fan-out ``pipeline`` primitive ASSUMES is then violated, so a textual merge
+        will conflict and the paradigm says SELECT among the competing fulls rather than merge them.
+        Pure over the candidate diffs (diagnostic; does not mutate candidates)."""
+        sets = []
+        for c in candidates:
+            if c is None:
+                continue
+            m = getattr(c, "meta", {}) or {}
+            if m.get("indeterminate") or m.get("carry_conflict"):
+                continue
+            paths = _diff_touched_paths(getattr(c, "diff", "") or "")
+            if paths:
+                sets.append(paths)
+        for i in range(len(sets)):
+            for j in range(i + 1, len(sets)):
+                inter = len(sets[i] & sets[j])
+                if not inter:
+                    continue
+                union = len(sets[i] | sets[j])
+                if union and (inter / union) >= threshold:
+                    return True
+        return False
+
     def decompose(self, *, vendor: Optional[str] = None, model: Optional[str] = None,
                   agent_id: int = 700100) -> Optional[dict]:
         """Read-only, schema-validated repo DECOMPOSITION (the convergence default's wave 0).
@@ -1204,7 +1298,12 @@ class OrchestrationContext:
                     "candidate": None, "conflicts": ["__acquire__"], "indeterminate": True}
         try:
             wt = handle.path
-            if carry_diff and not apply_diff(wt, carry_diff):
+            # Strip harness scaffolding (.apex_seatbelt/) from every diff BEFORE applying: a
+            # per-worktree new-file like read_jail.sb is byte-divergent across modules and would
+            # conflict purely on scaffolding, sinking a genuinely-disjoint merge (defense-in-depth
+            # on top of the extraction-time exclude, so even a pre-fix cached diff is safe).
+            carry_clean = _strip_scaffold_hunks(carry_diff or "")
+            if carry_clean.strip() and not apply_diff(wt, carry_clean):
                 conflicts.append("__carry__")
                 indeterminate = True
                 self.log("reduce_residuals: carry diff conflicted on merge tree (re-solve from base)")
@@ -1213,7 +1312,7 @@ class OrchestrationContext:
                 if m.get("indeterminate") or m.get("carry_conflict"):
                     conflicts.append(str(m.get("module") or c.candidate_id))
                     continue
-                d = (c.diff or "")
+                d = _strip_scaffold_hunks(c.diff or "")
                 if not d.strip():
                     continue
                 if not apply_diff(wt, d):
@@ -1245,6 +1344,10 @@ class OrchestrationContext:
                 self._checkpoint_accepted(cand)
             return {"merged_diff": merged_diff, "residual_failing_ids": list(vr.failing_nodeids),
                     "accepted": bool(cand.accepted), "candidate": cand,
+                    # gold_passed lets the orchestrator distinguish a CLIMBING partial (enter
+                    # loop-until-dry) from a TOTAL collapse (route to SELECT/best-of-N), so a
+                    # majority-conflict merge that still made progress is not thrown to best-of-N.
+                    "gold_passed": int(getattr(vr, "passed", 0) or 0),
                     "conflicts": list(conflicts), "indeterminate": bool(indeterminate or vr.indeterminate)}
         finally:
             self._provider.release(handle, confirm_patch_extracted=True)
@@ -1253,11 +1356,13 @@ class OrchestrationContext:
         """The full git diff of the merge worktree vs its base commit (the carry + every applied
         module diff, captured as a single replay-safe artifact)."""
         from ..isolation.worktree import _git
-        res = _git("diff", self._provider.base_commit, cwd=wt)
+        # Exclude harness scaffolding so the scored/accepted/carried artifact is worktree-path
+        # INDEPENDENT (strengthens the byte-stable merged-diff cache key) and never ships .sb noise.
+        res = _git("diff", self._provider.base_commit, *_SCAFFOLD_PATHSPEC, cwd=wt)
         if res.returncode == 0 and (res.stdout or "").strip():
             return res.stdout
         # fall back to the worktree-relative diff (unstaged) when the base-rev form is empty.
-        res2 = _git("diff", cwd=wt)
+        res2 = _git("diff", *_SCAFFOLD_PATHSPEC, cwd=wt)
         return res2.stdout if res2.returncode == 0 else ""
 
     def repair_residual(self, residual_ids: Sequence[str], *, carry_diff: str,

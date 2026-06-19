@@ -100,21 +100,43 @@ def orchestrate(ctx):
         return red["candidate"]
     if red["merged_diff"]:
         carry = red["merged_diff"]          # carry the best merged partial forward
-    # a conflicting module is re-solved CLEAN against the last-known-good carry (never erased).
+    # a conflicting module is logged (telemetry); its banked candidate is consumed below by the
+    # collapse SELECT / the final ctx.select over all_candidates -- never silently orphaned.
     if red["conflicts"]:
         for name in red["conflicts"]:
             ctx.defer("merge_conflict", name, "module diff conflicted on the merge tree")
 
-    # (3) LOOP-UNTIL-DRY on the live merged tree vs the EXACT residual failing node-ids.
-    # Each round: one repair agent scoped to the residuals on the carry tree -> re-reduce ->
-    # if the frontier rose, carry the new merged partial forward. The SPFG+ governor stops a
-    # TRUE plateau (no progress) while letting a climbing frontier continue; dedup vs SEEN is
-    # automatic in ctx.parallel accounting.
+    # (2b) NO-SILENT-LOSS COLLAPSE FALLBACK. When the fan-out emitted COMPETING WHOLE-REPO
+    # candidates (not disjoint slices), the textual merge collapses: most/all module diffs conflict
+    # AND the merged tree makes zero gold progress. A textual 3-way merge of overlapping FULL
+    # artifacts is exactly what the dynamic-workflow paradigm forbids -> SELECT among the competing
+    # fulls, then fall back to the cheap whole-repo best-of-N verify-and-accept path (the path the
+    # flat default solves by). Gated to a GENUINE collapse (zero gold progress) so a climbing
+    # partial still enters loop-until-dry below.
+    n = len([c for c in cands if c is not None])
+    majority_conflict = len(red["conflicts"]) >= max(2, (n + 1) // 2)
+    collapsed = int(red.get("gold_passed", 0) or 0) == 0 and (
+        not (red["merged_diff"] or "").strip() or majority_conflict)
+    if collapsed:
+        ctx.log("fan-out collapsed (competing whole-repo candidates; overlap="
+                + str(ctx.modules_overlap(cands)) + "); SELECT then best-of-N fallback")
+        w = ctx.judge_select(ctx.all_candidates())
+        if w is not None:
+            return w
+        return ctx.workflow("default-best-of-n")
+
+    # (3) LOOP-UNTIL-DRY on the live merged tree until the merge ACCEPTS or the governor cuts.
+    # The guard is `not red["accepted"]` (NOT `and residual`): a merged tree that ERRORS at
+    # COLLECTION has an EMPTY failing_nodeids yet is unsolved, so keying the loop on residual ran
+    # ZERO recovery rounds and discarded the whole fan-out (the jinja abstain). When residual is
+    # empty we repair against the union of module gold ids. should_continue_waves() stays the halt
+    # authority: a true plateau / agent ceiling / budget stops it (honest abstain, never fake pass).
     ctx.phase("loop-until-dry")
     residual = red["residual_failing_ids"]
     rnd = 0
-    while ctx.should_continue_waves() and residual:
-        c = ctx.repair_residual(residual, carry_diff=carry, round=rnd)
+    while ctx.should_continue_waves() and not red["accepted"]:
+        targets = residual or ctx.module_gold_ids(modules)
+        c = ctx.repair_residual(targets, carry_diff=carry, round=rnd)
         rnd = rnd + 1
         red = ctx.reduce_residuals([c], carry_diff=carry)
         if red["accepted"]:
@@ -250,10 +272,20 @@ def orchestrate(ctx):
         return red["candidate"]
     if red["merged_diff"]:
         carry = red["merged_diff"]
+    # no-silent-loss collapse: competing whole-repo candidates -> SELECT then best-of-N fallback.
+    n = len([c for c in cands if c is not None])
+    if int(red.get("gold_passed", 0) or 0) == 0 and (
+            not (red["merged_diff"] or "").strip()
+            or len(red["conflicts"]) >= max(2, (n + 1) // 2)):
+        w = ctx.judge_select(ctx.all_candidates())
+        if w is not None:
+            return w
+        return ctx.workflow("default-best-of-n")
     residual = red["residual_failing_ids"]
     rnd = 0
-    while ctx.should_continue_waves() and residual:              # loop-until-dry on the live tree
-        c = ctx.repair_residual(residual, carry_diff=carry, round=rnd)
+    while ctx.should_continue_waves() and not red["accepted"]:   # loop-until-dry on the live tree
+        targets = residual or ctx.module_gold_ids(modules)
+        c = ctx.repair_residual(targets, carry_diff=carry, round=rnd)
         rnd = rnd + 1
         red = ctx.reduce_residuals([c], carry_diff=carry)
         if red["accepted"]:

@@ -73,13 +73,20 @@ def _normalize_usage(usage: dict | None) -> TokenUsage:
     return TokenUsage(input=inp, output=out, cached_input=cached, reasoning=reasoning, cache_creation=cache_creation)
 
 
+# Harness scaffolding the read-jail launcher writes into every worktree (e.g.
+# `.apex_seatbelt/read_jail.sb`). It is not part of any solution; excluding it at the SOURCE keeps
+# every candidate fs_diff (and thus every banked/merged artifact) free of per-worktree noise that
+# would otherwise create spurious cross-module 3-way conflicts in reduce_residuals.
+_SCAFFOLD_PATHSPEC = ["--", ".", ":(exclude).apex_seatbelt/"]
+
+
 def _git_diff(cwd: str, baseline_ref: str = "HEAD") -> str:
     """Worktree diff vs the base commit (filesystem-as-truth).  intent-to-add so
     new files (the common commit0 case) appear in the diff.  Never raises."""
     try:
         subprocess.run(["git", "-C", cwd, "add", "-N", "."], capture_output=True, text=True, timeout=120)
         out = subprocess.run(
-            ["git", "-C", cwd, "diff", "--no-color", "--no-ext-diff", baseline_ref],
+            ["git", "-C", cwd, "diff", "--no-color", "--no-ext-diff", baseline_ref, *_SCAFFOLD_PATHSPEC],
             capture_output=True, text=True, timeout=120,
         )
         return out.stdout or ""
