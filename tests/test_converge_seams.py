@@ -297,6 +297,44 @@ def test_reduce_conflict_preserves_carry_and_requeues_module():
     assert not any("test_x" in i for i in red["residual_failing_ids"])
 
 
+# --------------------------------------------------------------------------- binary-carry regression
+def test_binary_artifact_carry_reapplies_only_with_binary_capture():
+    """REGRESSION (babel collapse): a carry diff that CREATES a binary artifact (agent-generated
+    locale-data *.dat class) must RE-APPLY into a fresh worktree. `git diff` WITHOUT --binary records
+    only 'Binary files differ' (no content) which `git apply` rejects -> every carry-forward / merge
+    re-apply CONFLICTS -> indeterminate rounds -> early governor cut (converge 925->2, ralph 4458->
+    1165). The fix is `git diff --binary` at capture (v1_executor._git_diff + context._merged_diff)."""
+    from apex_omega.isolation.worktree import apply_diff
+
+    def _git(args, cwd):
+        return subprocess.run(["git", "-C", str(cwd), *args], text=True, capture_output=True)
+
+    base = Path(tempfile.mkdtemp()) / "src"
+    base.mkdir()
+    (base / "mod.py").write_text("X = 0\n")
+    for c in (["init", "-q"], ["add", "-A"],
+              ["-c", "user.email=a@b.c", "-c", "user.name=x", "commit", "-qm", "base"]):
+        _git(c, base)
+    # an agent worktree: create a real binary artifact + edit source (mirrors the executor's add -N).
+    wt = Path(tempfile.mkdtemp()) / "wt"
+    subprocess.run(["git", "clone", "-q", str(base), str(wt)], check=True, capture_output=True)
+    (wt / "data.bin").write_bytes(bytes(range(256)) * 8)
+    (wt / "mod.py").write_text("X = 1\n")
+    _git(["add", "-N", "."], wt)
+    plain = _git(["diff", "--no-color", "HEAD"], wt).stdout            # old capture (BUG)
+    binary = _git(["diff", "--binary", "--no-color", "HEAD"], wt).stdout   # the FIX
+    assert "Binary files" in plain and "GIT binary patch" not in plain
+    assert "GIT binary patch" in binary
+    # fresh worktree at base: the plain diff FAILS to apply; the --binary diff SUCCEEDS + recreates it.
+    f1 = Path(tempfile.mkdtemp()) / "f1"
+    subprocess.run(["git", "clone", "-q", str(base), str(f1)], check=True, capture_output=True)
+    assert apply_diff(str(f1), plain) is False
+    f2 = Path(tempfile.mkdtemp()) / "f2"
+    subprocess.run(["git", "clone", "-q", str(base), str(f2)], check=True, capture_output=True)
+    assert apply_diff(str(f2), binary) is True
+    assert (f2 / "data.bin").exists() and (f2 / "mod.py").read_text() == "X = 1\n"
+
+
 # --------------------------------------------------------------------------- merge-reduce-overhaul
 def test_apply_diff_partial_lands_clean_hunks_drops_conflicting():
     """HUNK-LEVEL partial apply (#1): a 2-hunk diff where one hunk conflicts must still land the

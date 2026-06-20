@@ -86,7 +86,12 @@ def _git_diff(cwd: str, baseline_ref: str = "HEAD") -> str:
     try:
         subprocess.run(["git", "-C", cwd, "add", "-N", "."], capture_output=True, text=True, timeout=120)
         out = subprocess.run(
-            ["git", "-C", cwd, "diff", "--no-color", "--no-ext-diff", baseline_ref, *_SCAFFOLD_PATHSPEC],
+            # --binary EMBEDS binary blobs (GIT binary patch + full index) so a captured diff that
+            # creates binary artifacts (e.g. babel's agent-generated locale-data *.dat files) is
+            # RE-APPLYABLE. Without it git records only "Binary files differ" (no content), which
+            # `git apply` rejects ("cannot apply binary patch without full index line") — making every
+            # carry-forward / merge re-apply CONFLICT and collapsing the run on binary-producing repos.
+            ["git", "-C", cwd, "diff", "--binary", "--no-color", "--no-ext-diff", baseline_ref, *_SCAFFOLD_PATHSPEC],
             capture_output=True, text=True, timeout=120,
         )
         return out.stdout or ""

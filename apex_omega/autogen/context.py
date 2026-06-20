@@ -1909,11 +1909,13 @@ class OrchestrationContext:
         from ..isolation.worktree import _git
         # Exclude harness scaffolding so the scored/accepted/carried artifact is worktree-path
         # INDEPENDENT (strengthens the byte-stable merged-diff cache key) and never ships .sb noise.
-        res = _git("diff", self._provider.base_commit, *_SCAFFOLD_PATHSPEC, cwd=wt)
+        # --binary embeds binary blobs so the merged carry RE-APPLIES (babel *.dat etc.); without it
+        # the carry records only "Binary files differ" and every downstream re-apply conflicts.
+        res = _git("diff", "--binary", self._provider.base_commit, *_SCAFFOLD_PATHSPEC, cwd=wt)
         if res.returncode == 0 and (res.stdout or "").strip():
             return res.stdout
         # fall back to the worktree-relative diff (unstaged) when the base-rev form is empty.
-        res2 = _git("diff", *_SCAFFOLD_PATHSPEC, cwd=wt)
+        res2 = _git("diff", "--binary", *_SCAFFOLD_PATHSPEC, cwd=wt)
         return res2.stdout if res2.returncode == 0 else ""
 
     def repair_residual(self, residual_ids: Sequence[str], *, carry_diff: str,
