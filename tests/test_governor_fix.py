@@ -48,6 +48,20 @@ def _cand(errors, cid, *, gold=0, total=5091):
               "empty_diff": True, "indeterminate": False})
 
 
+def _vcand(cid, *, errors=0, gold=0, total=100, failing=None, excerpts="", empty=True):
+    # a VALID measurement carrying the full SPFG++ vector inputs (errors / failing_nodeids /
+    # failure_excerpts). empty=False emits a NEW distinct diff (active, not sterile).
+    failing = list(failing or [])
+    return candidate_from_verification(
+        candidate_id=cid, diff=("" if empty else cid),
+        vr=VerificationResult(passed=gold, errors=errors, total=total,
+                              pass_rate=gold / max(1, total),
+                              failing_nodeids=failing, failure_excerpts=excerpts),
+        meta={"gold_passed": gold, "gold_total": total, "errors": errors,
+              "empty_diff": empty, "indeterminate": False,
+              "failing_nodeids": failing, "failure_excerpts": excerpts})
+
+
 # ----------------------------------------------------------------- Fix 3: unified harness ceiling
 def test_fix3_in_cell_harness_stall_unified_to_indet_ceil():
     ctx = _ctx()
@@ -57,6 +71,7 @@ def test_fix3_in_cell_harness_stall_unified_to_indet_ceil():
 # ----------------------------------------------------------------- Fix 1+2: context._observe
 def test_fix1_collection_error_drop_resets_patience_and_sterile():
     ctx = _ctx()
+    ctx._frontier_vector = False                   # pin the errors-only fallback (APEX_FRONTIER_VECTOR=0 ablation)
     ctx._observe([_cand(5091, "a")])              # baseline (establishes the error frontier, NOT a rise)
     ctx._observe([_cand(5091, "b")])              # flat errors, empty diff -> no progress
     assert ctx._wave_state()["valid_measurements_since_improvement"] >= 1
@@ -70,6 +85,7 @@ def test_fix1_collection_error_drop_resets_patience_and_sterile():
 
 def test_fix1_flat_errors_still_plateaus_and_goes_sterile():
     ctx = _ctx()
+    ctx._frontier_vector = False                   # errors-only fallback
     ctx._observe([_cand(5091, "a")])              # baseline
     base = ctx._sterile_streak
     for i in range(3):                            # errors FLAT at 5091, empty diffs -> no progress
@@ -82,10 +98,76 @@ def test_fix1_flat_errors_still_plateaus_and_goes_sterile():
 
 def test_fix1_does_not_bank_solve_on_error_drop():
     ctx = _ctx()
+    ctx._frontier_vector = False                   # errors-only fallback
     ctx._observe([_cand(5091, "a")])
     ctx._observe([_cand(0, "b", gold=0)])         # full collection, still 0 gold passing
     assert ctx._best_gold_passed == 0             # collection fixed != a solve
     assert ctx._best_min_errors == 0
+
+
+# ----------------------------------------------------------------- SPFG++ secondary-frontier VECTOR
+def test_spfgpp_failing_len_shrink_resets_patience():
+    ctx = _ctx()                                   # vector ON by default
+    ctx._observe([_vcand("a", failing=["t1", "t2", "t3", "t4"])])   # baseline
+    ctx._observe([_vcand("b", failing=["t1", "t2", "t3", "t4"])])   # flat -> no progress
+    assert ctx._wave_state()["valid_measurements_since_improvement"] >= 1
+    ctx._observe([_vcand("c", failing=["t1", "t2"])])              # residual shrank -> progress
+    assert ctx._wave_state()["valid_measurements_since_improvement"] == 0
+    assert ctx._best_gold_passed == 0                              # NEVER a gold solve (C7)
+    assert ctx._best_vec["neg_failing_len"] == -2
+
+
+def test_spfgpp_import_depth_rise_resets_patience_when_errors_flat():
+    # errors COUNT flat, but the failing import advances deeper (a.b -> a.b.c.d) = real collection
+    # progress the errors-only secondary MISSES (the FM-2 collection-collapse case).
+    ctx = _ctx()
+    ctx._observe([_vcand("a", errors=50, excerpts="No module named 'a.b'")])      # baseline depth 2
+    ctx._observe([_vcand("b", errors=50, excerpts="No module named 'a.b'")])      # flat -> no progress
+    assert ctx._wave_state()["valid_measurements_since_improvement"] >= 1
+    ctx._observe([_vcand("c", errors=50, excerpts="No module named 'a.b.c.d'")])  # deeper -> progress
+    assert ctx._wave_state()["valid_measurements_since_improvement"] == 0
+    assert ctx._best_vec["import_depth"] == 4
+    assert ctx._best_gold_passed == 0
+
+
+def test_spfgpp_flat_everything_still_plateaus():
+    ctx = _ctx()
+    ctx._observe([_vcand("a", errors=50, failing=["t1", "t2"], excerpts="No module named 'a.b'")])
+    for i in range(3):                              # everything flat -> genuine no-progress
+        ctx._observe([_vcand("f%d" % i, errors=50, failing=["t1", "t2"], excerpts="No module named 'a.b'")])
+    assert ctx._wave_state()["valid_measurements_since_improvement"] >= 3
+    assert ctx._sterile_streak >= 3
+    assert ctx._best_gold_passed == 0
+
+
+def test_spfgpp_active_new_code_resets_sterile_not_frontier():
+    # an agent emitting NEW distinct diffs that improve NO test outcome: NOT sterile (still active)
+    # but the no-PROGRESS frontier arm keeps ticking -> eventually cut. The deliberate refinement
+    # that closes the false-CONTINUE-forever hole of a raw cum-diff frontier component.
+    ctx = _ctx()
+    ctx._observe([_vcand("a", errors=50, failing=["t1", "t2"], empty=False)])   # baseline
+    for i in range(3):
+        ctx._observe([_vcand("new%d" % i, errors=50, failing=["t1", "t2"], empty=False)])  # new diffs, flat outcomes
+    assert ctx._sterile_streak == 0                                  # active -> not sterile
+    assert ctx._wave_state()["valid_measurements_since_improvement"] >= 3   # but no real progress -> arm advances
+
+
+def test_spfgpp_parse_import_depth():
+    f = OrchestrationContext._parse_import_depth
+    assert f("No module named 'a.b.c'") == 3
+    assert f("cannot import name 'X' from 'pkg.sub'") == 2
+    assert f("E   No module named 'a'\nE   No module named 'a.b.c.d'") == 4
+    assert f("some unrelated assertion error") is None
+    assert f("") is None
+
+
+def test_spfgpp_ablation_off_is_errors_only():
+    ctx = _ctx()
+    ctx._frontier_vector = False
+    # failing_len shrink alone must NOT credit when the vector is ablated (errors-only fallback).
+    ctx._observe([_vcand("a", errors=50, failing=["t1", "t2", "t3"])])  # baseline
+    ctx._observe([_vcand("b", errors=50, failing=["t1"])])             # residual shrank, errors flat
+    assert ctx._wave_state()["valid_measurements_since_improvement"] >= 1   # NOT credited (errors flat)
 
 
 # ----------------------------------------------------------------- Fix 1: FrontierTracker (ladder tier)

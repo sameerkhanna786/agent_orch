@@ -336,6 +336,27 @@ class OrchestrationContext:
         # while it is genuinely progressing. A genuinely flat run (errors 5091->5091) is unaffected
         # and still cut correctly.
         self._best_min_errors = None
+        # SPFG++ (FM-2 / stop-policy design): GENERALIZE the errors-only secondary into a small
+        # VECTOR of execution-grounded TEST-OUTCOME progress signals, each oriented higher=better and
+        # credited only on a STRICT rise from an established baseline (same no-credit-on-first
+        # convention as gold). A rise in ANY component resets BOTH patience arms but NEVER banks a
+        # gold solve. Components:
+        #   neg_errors      = -collection-error count  (more of the suite now collects)
+        #   neg_failing_len = -full-suite failing-id count (residual failures shrinking — captures
+        #                     fail->pass beyond the EXPECTED-id gold count)
+        #   import_depth    = deepest dotted module reached before a collection error (as shallow
+        #                     modules get implemented the first failing import moves DEEPER -> rises;
+        #                     the ONLY rising signal on an early collection-collapse repo where errors
+        #                     are still flat — directly fixes the FM-2 "cut a progressing collapse").
+        # Deliberate refinement of the 8-vector design: NEW-on-disk-code activity (cum diff bytes /
+        # changed files) is routed to the STERILE-streak reset via `any_new_useful`, NOT this frontier
+        # arm — so an agent thrashing out new-but-useless code is not "sterile" yet still eventually
+        # cut on genuine no-PROGRESS (avoids the false-CONTINUE-forever hole). Ablate the whole vector
+        # with APEX_FRONTIER_VECTOR=0 -> errors-only secondary (exact pre-SPFG++ behavior).
+        self._best_vec: dict = {}
+        self._frontier_vector = (
+            os.environ.get("APEX_FRONTIER_VECTOR", "1").strip().lower()
+            not in ("0", "false", "no", "off"))
         self._nonresult_streak = 0
         self._sterile_streak = 0
         self._seen_shas: set = set()
@@ -549,6 +570,7 @@ class OrchestrationContext:
         round_pass = self._best_pass_rate
         frontier_cand = None     # the candidate that pushed the gold frontier up this batch
         round_min_errors = None  # Fix 1: lowest VALID collection-error count this batch (secondary frontier)
+        round_vec: dict = {}     # SPFG++: this batch's BEST (higher=better) per secondary-frontier component
         n_attempts = len(out)
         n_nonresult = 0          # attempts that produced no usable work
         n_sterile = 0            # attempts with an empty diff OR a diff already seen this run
@@ -591,6 +613,16 @@ class OrchestrationContext:
                 # the first collect/pass on a large not-yet-collecting repo.
                 _err = int(m.get("errors", 0) or 0)
                 round_min_errors = _err if round_min_errors is None else min(round_min_errors, _err)
+                # SPFG++ secondary-frontier vector (valid measurements only), each higher=better:
+                if self._frontier_vector:
+                    def _bump(key, val):
+                        cur = round_vec.get(key)
+                        round_vec[key] = val if cur is None else max(cur, val)
+                    _bump("neg_errors", -_err)
+                    _bump("neg_failing_len", -len(m.get("failing_nodeids") or []))
+                    _idep = self._parse_import_depth(m.get("failure_excerpts"))
+                    if _idep is not None:
+                        _bump("import_depth", int(_idep))
             fs = m.get("finalization_status")
             if bool(m.get("indeterminate")) or (
                     fs in ("policy_violation", "infra_nonresult", "timeout") and gp <= 0 and pr <= 0.0):
@@ -615,7 +647,14 @@ class OrchestrationContext:
         # itself progress — same convention as gold); only a STRICT DROP from an established baseline
         # counts, so a small already-collecting repo (errors==0 throughout) is wholly unaffected.
         secondary_improved = False
-        if round_min_errors is not None:
+        if self._frontier_vector:
+            # SPFG++: a strict rise in ANY test-outcome component (errors down / residual failures
+            # shrinking / imports advancing deeper) is genuine implementation progress on a large
+            # not-yet-passing repo. _fold_secondary_vector establishes each component's baseline
+            # without crediting it (first measurement is not itself progress) and commits the new
+            # best on a strict rise — NEVER banking a gold solve.
+            secondary_improved = self._fold_secondary_vector(round_vec)
+        elif round_min_errors is not None:
             if self._best_min_errors is None:
                 self._best_min_errors = round_min_errors
             elif round_min_errors < self._best_min_errors:
@@ -638,8 +677,9 @@ class OrchestrationContext:
             self._best_pass_rate = round_pass
             # Fix 1: advance the secondary collection-error frontier on a strict drop (baseline was
             # established above). Never banks a gold solve — best_gold_passed is unchanged when only
-            # the secondary fired.
-            if secondary_improved:
+            # the secondary fired. (The SPFG++ vector path commits its component bests inside
+            # _fold_secondary_vector; only the errors-only fallback commits here.)
+            if secondary_improved and not self._frontier_vector:
                 self._best_min_errors = round_min_errors
             self._dry_rounds = 0
             self._tokens_at_best = self._engine.budget.spent()
@@ -666,6 +706,45 @@ class OrchestrationContext:
             self._sterile_streak = 0
         else:
             self._sterile_streak += max(1, n_sterile)
+
+    def _fold_secondary_vector(self, round_vec: dict) -> bool:
+        """SPFG++ secondary frontier. Each component is oriented higher=better. The FIRST observation
+        of a component establishes its baseline WITHOUT crediting it (same no-credit-on-first
+        convention as the gold frontier); any later STRICT rise credits progress and commits the new
+        component best. Returns True iff some component strictly rose. Monotone-best per component, so
+        a dip that does not beat the best is dry (never a regression), and this NEVER banks a gold
+        solve (best_gold_passed is untouched)."""
+        improved = False
+        for key, val in round_vec.items():
+            if val is None:
+                continue
+            best = self._best_vec.get(key)
+            if best is None:
+                self._best_vec[key] = val          # establish baseline, no credit
+            elif val > best:
+                self._best_vec[key] = val           # strict rise -> credit + commit
+                improved = True
+        return improved
+
+    @staticmethod
+    def _parse_import_depth(excerpts) -> Optional[int]:
+        """Best-effort collection-progress proxy: the deepest dotted module name implicated in a
+        pytest COLLECTION import error (``No module named 'a.b.c'`` -> depth 3; ``cannot import name X
+        from 'a.b'`` -> depth 2). As shallow modules get implemented the first failing import moves
+        DEEPER, so the max depth RISES — the only monotone progress signal on an early collection-
+        collapse repo whose error COUNT is still flat. Returns None when no import error is present
+        (e.g. the suite collects cleanly), so an already-collecting repo gets no spurious credit."""
+        if not excerpts:
+            return None
+        best: Optional[int] = None
+        text = str(excerpts)
+        for mm in re.finditer(r"No module named ['\"]([\w\.]+)['\"]", text):
+            d = mm.group(1).count(".") + 1
+            best = d if best is None else max(best, d)
+        for mm in re.finditer(r"cannot import name ['\"][\w]+['\"] from ['\"]([\w\.]+)['\"]", text):
+            d = mm.group(1).count(".") + 1
+            best = d if best is None else max(best, d)
+        return best
 
     def _wave_state(self) -> dict:
         """The cut-losses detector inputs at the current wave boundary. All cut signals are in
