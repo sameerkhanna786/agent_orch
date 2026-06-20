@@ -9529,9 +9529,18 @@ class CLIModelClient:
         # Audit H2: on macOS hosts with thousands of processes, ``ps -axo``
         # itself can take several seconds; cap to keep the orphan sweeper
         # from blocking the parent.
+        # FM-5 (cross-cell process-tree kill): also capture PGID. The agent subprocess is launched
+        # with start_new_session=True (so it is a session+group LEADER, pgid==pid) and all its
+        # find/grep descendants inherit that PGID. A CONCURRENT OTHER cell's agent has its OWN
+        # session => a different PGID. Host-wide `ps` + PPID-walking alone cannot isolate one cell's
+        # tree from another's (orphans reparent to PID 1 / a subreaper, PIDs get reused, the scan is
+        # non-atomic), so a sibling cell's `find` was being swept into THIS cell's audit and fatally
+        # aborting it (~14% of all aborts named a DIFFERENT cell). PGID survives reparenting and PID
+        # reuse, so filtering the walked tree to the root's PGID excludes foreign processes by
+        # construction while keeping every legitimate (reparented) own descendant.
         try:
             result = subprocess.run(
-                ["ps", "-axo", "pid=,ppid=,time=,command="],
+                ["ps", "-axo", "pid=,ppid=,pgid=,time=,command="],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -9545,23 +9554,33 @@ class CLIModelClient:
         children_by_parent: dict[int, list[int]] = {}
         entries_by_pid: dict[int, dict[str, Any]] = {}
         for line in result.stdout.splitlines():
-            parts = line.strip().split(None, 3)
-            if len(parts) != 4:
+            parts = line.strip().split(None, 4)
+            if len(parts) != 5:
                 continue
             try:
                 pid = int(parts[0])
                 ppid = int(parts[1])
             except ValueError:
                 continue
+            try:
+                pgid = int(parts[2])
+            except ValueError:
+                pgid = None
             entries_by_pid[pid] = {
                 "ppid": ppid,
-                "cpu_seconds": self._parse_ps_time_to_seconds(parts[2]),
-                "command": parts[3].strip(),
+                "pgid": pgid,
+                "cpu_seconds": self._parse_ps_time_to_seconds(parts[3]),
+                "command": parts[4].strip(),
             }
             children_by_parent.setdefault(ppid, []).append(pid)
 
         if root_pid not in entries_by_pid:
             return {}
+
+        # The cell's process-group id (== root_pid when the agent was started with start_new_session).
+        # When it can't be determined, fall back to the legacy PPID-only walk (never silently disable
+        # the audit) — only ADD the foreign-process exclusion when we positively know the boundary.
+        root_pgid = entries_by_pid[root_pid].get("pgid")
 
         tree_entries: dict[int, dict[str, Any]] = {}
         stack = [root_pid]
@@ -9571,6 +9590,13 @@ class CLIModelClient:
                 continue
             entry = entries_by_pid.get(pid)
             if entry is None:
+                continue
+            # FM-5: skip (and do not descend through) any process whose PGID does not match this
+            # cell's — a foreign cell's process that only appears in our walk via PID reuse /
+            # reparenting. The root itself always matches. Ambiguous (pgid==None) processes are kept
+            # so a real escape is never silently dropped.
+            if (root_pgid is not None and pid != root_pid
+                    and entry.get("pgid") is not None and entry.get("pgid") != root_pgid):
                 continue
             tree_entries[pid] = dict(entry)
             stack.extend(children_by_parent.get(pid, []))

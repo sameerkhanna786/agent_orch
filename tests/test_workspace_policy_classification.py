@@ -166,3 +166,34 @@ def test_downgraded_escape_still_records_sandbox_escape():
 def test_clean_completion_records_nothing():
     integ = classify_attempt_integrity(_Res(error=None))
     assert not any(s["kind"] == "sandbox_escape" for s in integ.get("signals", []))
+
+
+# --------------------------------------------------------------- FM-5: cross-cell PGID isolation
+def test_fm5_pgid_filters_foreign_cell_process(monkeypatch):
+    # a CONCURRENT sibling cell's `find` (pgid 200) is PID-reuse-linked as a child of THIS cell's
+    # root (pid 100, pgid 100). PGID filtering must exclude it so it can't fatally abort this cell.
+    from types import SimpleNamespace
+    import apex.core.cli_backend as cb
+    fake = (
+        "100 1 100 0:01.00 codex exec\n"
+        "101 100 100 0:00.50 find /cellA/repo -name x\n"        # own descendant (same pgid) -> kept
+        "200 100 200 0:00.30 find /cellB/repo -name y\n"        # foreign cell (pgid 200) -> excluded
+    )
+    monkeypatch.setattr(cb.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=fake))
+    tree = CLIModelClient.__new__(CLIModelClient)._collect_process_tree_entries(100)
+    assert set(tree) == {100, 101}
+    assert tree[101]["command"].startswith("find /cellA")
+
+
+def test_fm5_fallback_unknown_pgid_keeps_ppid_children(monkeypatch):
+    # if the root's PGID can't be parsed, fall back to the legacy PPID walk (never silently disable
+    # the audit) — a PPID child is still included.
+    from types import SimpleNamespace
+    import apex.core.cli_backend as cb
+    fake = (
+        "100 1 - 0:01.00 codex exec\n"
+        "201 100 - 0:00.30 find /other/repo -name y\n"
+    )
+    monkeypatch.setattr(cb.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=fake))
+    tree = CLIModelClient.__new__(CLIModelClient)._collect_process_tree_entries(100)
+    assert set(tree) == {100, 201}
