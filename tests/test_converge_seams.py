@@ -297,6 +297,68 @@ def test_reduce_conflict_preserves_carry_and_requeues_module():
     assert not any("test_x" in i for i in red["residual_failing_ids"])
 
 
+# --------------------------------------------------------------------------- merge-reduce-overhaul
+def test_apply_diff_partial_lands_clean_hunks_drops_conflicting():
+    """HUNK-LEVEL partial apply (#1): a 2-hunk diff where one hunk conflicts must still land the
+    OTHER hunk (the work all-or-nothing would shed), and leave NO *.rej residue."""
+    import glob
+    from apex_omega.isolation.worktree import apply_diff_partial
+    d = Path(tempfile.mkdtemp()) / "r"
+    d.mkdir()
+    pads = "\n".join("# p%d" % i for i in range(1, 13))   # 12 pad lines -> A and B are SEPARATE hunks
+    (d / "f.py").write_text("A = 0\n" + pads + "\nB = 0\n")
+    for c in (["git", "init", "-q"], ["git", "add", "-A"],
+              ["git", "-c", "user.email=a@b.c", "-c", "user.name=x", "commit", "-qm", "base"]):
+        subprocess.run(c, cwd=d, check=True, capture_output=True)
+    # generate a 2-hunk diff (A:0->1 far from B:0->2) via git
+    (d / "f.py").write_text("A = 1\n" + pads + "\nB = 2\n")
+    D = subprocess.run(["git", "-C", str(d), "diff"], text=True, capture_output=True).stdout
+    subprocess.run(["git", "-C", str(d), "checkout", "f.py"], check=True, capture_output=True)
+    # now make hunk-1's context STALE so it cannot apply, while hunk-2 (B) still matches base
+    (d / "f.py").write_text("A = 9\n" + pads + "\nB = 0\n")
+    r = apply_diff_partial(str(d), D)
+    txt = (d / "f.py").read_text()
+    assert r["clean"] is False and r["applied_any"] is True and r["rejected_hunks"] >= 1
+    assert "B = 2" in txt          # the disjoint hunk LANDED (recovered work)
+    assert "A = 9" in txt          # the conflicting hunk did NOT apply (worktree value kept)
+    assert glob.glob(str(d / "**" / "*.rej"), recursive=True) == []   # no .rej residue
+
+
+def test_reduce_floor_reverts_regressing_merge_to_best_coherent():
+    """NO-SILENT-LOSS floor (#2): when a merge scores BELOW the best banked coherent tree, the
+    reduce must carry the BEST tree forward (its diff/residual/gold), never the regression."""
+    from apex_omega.kernel.verify import candidate_from_verification
+    repo = _two_module_repo()
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
+    # the merge re-score returns a LOW (regressed) result regardless of tree.
+    low = VerificationResult(passed=1, total=10, pass_rate=0.1,
+                             failing_nodeids=["t%d" % i for i in range(2, 11)])
+    ctx = _ctx(eng, repo, lambda wt: low)
+    # bank a STRONG coherent candidate (gold 5) and fold it into the frontier.
+    strong = candidate_from_verification(
+        candidate_id="strong",
+        diff=("--- a/mod_a.py\n+++ b/mod_a.py\n@@ -1,2 +1,2 @@\n"
+              "-def a():\n-    return 0  # BUG\n+def a():\n+    return 1\n"),
+        vr=VerificationResult(passed=5, total=10, pass_rate=0.5,
+                              failing_nodeids=["t6", "t7", "t8", "t9", "t10"]),
+        meta={"gold_passed": 5, "gold_total": 10, "indeterminate": False, "empty_diff": False,
+              "failing_nodeids": ["t6", "t7", "t8", "t9", "t10"], "finalization_status": "completed"})
+    ctx._all_candidates.append(strong)
+    ctx._observe([strong])
+    assert ctx._best_gold_passed == 5
+    # a weak module whose merged tree re-scores at gold 1 (< 5) -> floor reverts to strong.
+    weak = candidate_from_verification(
+        candidate_id="weak",
+        diff=("--- a/mod_b.py\n+++ b/mod_b.py\n@@ -1,2 +1,2 @@\n"
+              "-def b():\n-    return 0  # BUG\n+def b():\n+    return 2\n"),
+        vr=VerificationResult(passed=1, total=10, pass_rate=0.1), meta={"module": "mod_b", "gold_passed": 1})
+    red = ctx.reduce_residuals([weak])
+    assert red["floored"] is True
+    assert red["gold_passed"] == 5                         # carried the best, not the regression
+    assert red["merged_diff"] == strong.diff
+    assert red["residual_failing_ids"] == ["t6", "t7", "t8", "t9", "t10"]
+
+
 # --------------------------------------------------------------------------- carry_best
 def test_carry_best_picks_highest_gold_partial():
     repo = _two_module_repo()

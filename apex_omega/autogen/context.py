@@ -23,7 +23,7 @@ from ..ablation.arms import AblationConfig
 from ..engine.governor import RunGovernor
 from ..engine.runtime import Engine
 from ..errors import CutLosses, FailLoud, PlateauStop
-from ..isolation.worktree import WorktreeProvider, apply_diff
+from ..isolation.worktree import WorktreeProvider, apply_diff, apply_diff_partial
 from ..kernel.select import Candidate, select_best
 from ..kernel.verify import VerificationResult, candidate_from_verification
 from ..schema_validate import validate_schema
@@ -1337,6 +1337,28 @@ class OrchestrationContext:
                 best = c
         return (best.diff or "") if best is not None else ""
 
+    def _best_coherent_candidate(self, *, exclude_id: Optional[str] = None) -> Optional[Candidate]:
+        """The best-so-far VALID candidate (highest gold-pass, pass_rate tiebreak) — the same monotone
+        frontier carry_best() returns, but as the Candidate (so callers can read its residual ids).
+        Every candidate here was independently full-suite scored, so its diff is a real coherent tree
+        (carry + its own edits), never a lone-module artifact. The no-silent-loss merge floor falls
+        back to THIS, so the merge can never carry a tree worse than the best already banked."""
+        best = None
+        best_key = (-1, -1.0)
+        for c in self.all_candidates():
+            if exclude_id is not None and getattr(c, "candidate_id", None) == exclude_id:
+                continue
+            m = getattr(c, "meta", {}) or {}
+            if m.get("indeterminate") or m.get("carry_conflict"):
+                continue
+            if not (c.diff or "").strip():
+                continue
+            key = (int(m.get("gold_passed", 0) or 0), float(c.public_signal_score or 0.0))
+            if key > best_key:
+                best_key = key
+                best = c
+        return best
+
     def module_gold_ids(self, modules: Sequence[dict]) -> list:
         """Union of the per-module ``gold_test_ids`` from a decompose plan — a concrete, pure
         repair target for loop-until-dry when the merged tree ERRORS at collection (so
@@ -1780,18 +1802,34 @@ class OrchestrationContext:
                 conflicts.append("__carry__")
                 indeterminate = True
                 self.log("reduce_residuals: carry diff conflicted on merge tree (re-solve from base)")
+            # merge-reduce-overhaul #1: HUNK-LEVEL partial apply. The old all-or-nothing apply dropped
+            # a colliding module's ENTIRE contribution; on a tightly-coupled repo (babel) that sheds
+            # most of the parallel fan-out (converge 925 << ralph 4458). With partial apply a module
+            # that conflicts on one shared hunk still lands its other (often ~80-90%) hunks; only the
+            # rejected residue is re-queued for loop-until-dry. Ablate with APEX_OMEGA_MERGE_PARTIAL=0.
+            # SAFE: the merged tree is re-scored on the full gold suite and the no-silent-loss floor
+            # (below) reverts any partial graft that lowers the score — a graft can never fake a pass.
+            partial = os.environ.get("APEX_OMEGA_MERGE_PARTIAL", "1").strip().lower() not in (
+                "0", "false", "no", "off")
             for c in cands:
                 m = getattr(c, "meta", {}) or {}
+                name = str(m.get("module") or c.candidate_id)
                 if m.get("indeterminate") or m.get("carry_conflict"):
-                    conflicts.append(str(m.get("module") or c.candidate_id))
+                    conflicts.append(name)
                     continue
                 d = _strip_scaffold_hunks(c.diff or "")
                 if not d.strip():
                     continue
-                if not apply_diff(wt, d):
-                    conflicts.append(str(m.get("module") or c.candidate_id))
-                    self.log(f"reduce_residuals: module diff conflicted ({m.get('module') or c.candidate_id}); "
-                             "re-queued, progress preserved")
+                if partial:
+                    r = apply_diff_partial(wt, d)
+                    if r.get("clean"):
+                        continue
+                    conflicts.append(name)        # rejected residue -> loop-until-dry re-solves it
+                    self.log(f"reduce_residuals: module {name} partially merged "
+                             f"({r.get('rejected_hunks', 0)} hunk(s) rejected, the rest landed)")
+                elif not apply_diff(wt, d):
+                    conflicts.append(name)
+                    self.log(f"reduce_residuals: module diff conflicted ({name}); re-queued, progress preserved")
                     continue
             # capture the merged diff (everything applied on top of base) + score it ONCE.
             merged_diff = self._merged_diff(wt)
@@ -1812,23 +1850,51 @@ class OrchestrationContext:
             # (more residual ids green across loop-until-dry rounds) RESETS the patience arms, and a
             # conflict/indeterminate reduce is neutral. No new stop logic — the existing governor
             # authority decides; should_continue_waves() consumes the updated _wave_state().
+            # The frontier BEFORE folding in this merge — the floor the merge must not drop below.
+            prior_frontier = int(self._best_gold_passed)
             self._observe([cand])
             if cand.accepted:
                 self._checkpoint_accepted(cand)
-            self._last_residual = list(vr.failing_nodeids)
-            result = {"merged_diff": merged_diff, "residual_failing_ids": list(vr.failing_nodeids),
-                      "accepted": bool(cand.accepted), "candidate": cand,
+            # merge-reduce-overhaul #2: NO-SILENT-LOSS REGRESSION FLOOR (the true safety primary).
+            # A textual/partial merge can score BELOW the best coherent tree already banked — a dropped
+            # foundational module or a bad partial graft can even collection-break the merged tree
+            # (exactly the catastrophic tail that pushes converge below the ralph single-lineage). When
+            # the VALID merge regresses below the prior frontier, carry the BEST coherent candidate
+            # forward instead of the regression (every banked candidate was full-suite scored, so it is
+            # a real tree, never a lone-module artifact). The merge stays banked for telemetry/select;
+            # we only refuse to make it the CARRY. Deterministic, zero-LLM, replay-safe; the merge is
+            # made MONOTONE so converge can never carry a worse tree than its strongest sub-result.
+            merge_gp = int(getattr(vr, "passed", 0) or 0)
+            floored = False
+            out_diff = merged_diff
+            out_residual = list(vr.failing_nodeids)
+            out_gp = merge_gp
+            out_cand = cand
+            if (not vr.indeterminate) and merge_gp < prior_frontier:
+                best = self._best_coherent_candidate(exclude_id=cand.candidate_id)
+                best_gp = int((getattr(best, "meta", {}) or {}).get("gold_passed", 0) or 0) if best else -1
+                if best is not None and best_gp > merge_gp:
+                    floored = True
+                    out_cand = best
+                    out_diff = best.diff or ""
+                    out_residual = list((best.meta or {}).get("failing_nodeids") or [])
+                    out_gp = best_gp
+                    self.log(f"reduce_residuals: NO-SILENT-LOSS floor — merge gold {merge_gp} < best "
+                             f"{best_gp}; carrying the best coherent tree forward (not the regressed merge)")
+            self._last_residual = list(out_residual)
+            result = {"merged_diff": out_diff, "residual_failing_ids": list(out_residual),
+                      "accepted": bool(cand.accepted), "candidate": out_cand,
                       # gold_passed lets the orchestrator distinguish a CLIMBING partial (enter
                       # loop-until-dry) from a TOTAL collapse (route to SELECT/best-of-N), so a
                       # majority-conflict merge that still made progress is not thrown to best-of-N.
-                      "gold_passed": int(getattr(vr, "passed", 0) or 0),
+                      "gold_passed": int(out_gp), "floored": floored,
                       "conflicts": list(conflicts), "indeterminate": bool(indeterminate or vr.indeterminate)}
             if scope_ids is not None:
-                # PURE SET TEST over the already-run full-suite score (no second pytest): a phase
-                # passes iff ALL its acceptance gold ids are absent from the failing set AND the
+                # PURE SET TEST over the EFFECTIVE residual (the merge's, or the floored best tree's): a
+                # phase passes iff ALL its acceptance gold ids are absent from the failing set AND the
                 # measurement was VALID (a collection error / indeterminate never fakes a pass).
                 sids = [str(s) for s in scope_ids]
-                failing_set = {str(x) for x in vr.failing_nodeids}
+                failing_set = {str(x) for x in out_residual}
                 green = [s for s in sids if s not in failing_set]
                 result["phase_total"] = len(sids)
                 result["phase_pass_count"] = len(green)

@@ -145,3 +145,50 @@ def apply_diff(worktree_cwd: str, diff_text: str) -> bool:
         if proc.returncode == 0:
             return True
     return False
+
+
+def apply_diff_partial(worktree_cwd: str, diff_text: str) -> dict:
+    """HUNK-LEVEL partial apply for the merge/reduce step (merge-reduce-overhaul #1).
+
+    Tries strict then ``--3way`` first — the cheap CLEAN path, identical to ``apply_diff`` (zero
+    extra cost for a disjoint module). Only when the whole patch can't apply does it fall back to
+    ``git apply --reject``, which lands EVERY hunk that DOES apply and writes the truly-conflicting
+    hunks to ``*.rej`` — so a module that collides on one shared hunk keeps its other (often ~80-90%)
+    hunks instead of being dropped wholesale (the dominant source of the converge<<ralph gap on
+    tightly-coupled repos). The ``*.rej`` files are immediately DELETED so they can never pollute the
+    scored/merged worktree diff (Cardinal-Contract hygiene). Returns
+    ``{"clean", "applied_any", "rejected_hunks"}``. NEVER raises. SAFE by construction: the merged
+    tree is always re-scored on the full gold suite, and the no-silent-loss floor reverts any partial
+    graft that lowers the score — so a partial apply can never fake a pass, only (at worst) be discarded."""
+    import glob as _glob
+    if not diff_text.strip():
+        return {"clean": True, "applied_any": False, "rejected_hunks": 0}
+    for extra in ([], ["--3way"]):
+        proc = subprocess.run(
+            ["git", "-C", worktree_cwd, "apply", "--whitespace=nowarn", *extra, "-"],
+            input=diff_text, text=True, capture_output=True,
+        )
+        if proc.returncode == 0:
+            return {"clean": True, "applied_any": True, "rejected_hunks": 0}
+    # PARTIAL: land every applicable hunk; conflicting hunks -> *.rej (then deleted).
+    try:
+        proc = subprocess.run(
+            ["git", "-C", worktree_cwd, "apply", "--reject", "--whitespace=nowarn", "-"],
+            input=diff_text, text=True, capture_output=True,
+        )
+    except Exception:
+        return {"clean": False, "applied_any": False, "rejected_hunks": 0}
+    n_rej = 0
+    for r in _glob.glob(os.path.join(worktree_cwd, "**", "*.rej"), recursive=True):
+        try:
+            with open(r, encoding="utf-8", errors="replace") as fh:
+                n_rej += max(1, fh.read().count("@@ "))   # ~1 per rejected hunk
+        except OSError:
+            n_rej += 1
+        try:
+            os.remove(r)
+        except OSError:
+            pass
+    # `git apply --reject` returns 0 (all hunks applied — rare here) or 1 (some rejected, rest applied).
+    applied_any = proc.returncode in (0, 1)
+    return {"clean": False, "applied_any": applied_any, "rejected_hunks": n_rej}
