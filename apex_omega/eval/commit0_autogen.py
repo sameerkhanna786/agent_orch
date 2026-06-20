@@ -369,7 +369,10 @@ def run_autogen_cell(
             """CONTRACT 2 — residual repair on the LIVE merged tree, scoped to the exact still-
             failing node-ids. Excerpts (real assertion tails) injected when provided."""
             ids = "\n".join(map(str, (failing_nodeids or [])[:40])) or "(see the failing subset)"
-            evidence = (("\nFailure evidence:\n" + excerpts + "\n") if (excerpts or "").strip() else "")
+            # FM-4: bound the repair context. The carry tree is APPLIED to the worktree (not pasted),
+            # ids are capped, and the assertion tail is hard-capped here so a large-suite repair turn
+            # can never blow the context/time budget on a multi-thousand-test repo.
+            evidence = (("\nFailure evidence:\n" + str(excerpts)[:3000] + "\n") if (excerpts or "").strip() else "")
             return (
                 _issue_and_plan(ctx)
                 + "\n\n--- RESIDUAL REPAIR (live merged tree) ---\n"

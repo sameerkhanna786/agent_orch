@@ -1886,7 +1886,8 @@ class OrchestrationContext:
         if prompt is None:
             base = self._prompt_builder(self, aid, "residual_repair")
             ids_block = "\n".join(ids[:40]) if ids else "(see the failing subset)"
-            excerpt_block = (("\nFailure evidence:\n" + excerpts + "\n") if (excerpts or "").strip() else "")
+            # FM-4: hard-cap the assertion tail so the repair turn stays within budget on large repos.
+            excerpt_block = (("\nFailure evidence:\n" + str(excerpts)[:3000] + "\n") if (excerpts or "").strip() else "")
             prompt = (
                 base
                 + "\n\n--- RESIDUAL REPAIR (live merged tree) ---\n"
