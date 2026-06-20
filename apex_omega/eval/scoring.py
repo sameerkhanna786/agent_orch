@@ -54,10 +54,18 @@ def decide_from_counts(
         return ok, ("solved" if ok else "unsolved"), pass_rate
 
 
-def verification_from_commit0_evaluation(evaluation: Any) -> VerificationResult:
+def verification_from_commit0_evaluation(evaluation: Any, *, expected_test_count: int = 0) -> VerificationResult:
     """Map a v1 ``Commit0Evaluation`` to APEX-Ω's VerificationResult.  The
     ``accepted`` gate comes from the evaluation's own contract success (execution
-    evidence), never a soft score."""
+    evidence), never a soft score.
+
+    ``expected_test_count`` is the AUTHORITATIVE static gold-id universe size
+    (``len(_load_expected_test_ids(repo))`` from the commit0 bz2 inventory). When
+    supplied it is the measurement-integrity denominator-of-record (FM-3): if the
+    scored gold denominator collapsed below it (a collection-collapse run where
+    only a handful of expected ids COLLECTED — the babel ``gold_total=10`` artifact),
+    the uncollected ids are MISSING by construction, so the result can NEVER falsely
+    accept on the collected subset and the frontier sees the TRUE distance-to-solve."""
     def _g(name: str, default=0):
         return getattr(evaluation, name, default)
 
@@ -73,6 +81,20 @@ def verification_from_commit0_evaluation(evaluation: Any) -> VerificationResult:
     missing = int(_g("missing_expected",
                     cov.get("missing_expected_test_count", _g("missing", 0))) or 0)
     pass_rate = float(_g("pass_rate", 0.0) or 0.0)
+    # FM-3 measurement-integrity reconcile: the gold denominator-of-record is the AUTHORITATIVE
+    # static expected-id universe, never the COLLECTED subset. When the scored denominator collapsed
+    # below it (collection-collapse: only a few expected ids collected, e.g. babel gold_total=10),
+    # the uncollected ids are MISSING by construction. Lift total to the true universe and recount
+    # missing so (a) the SPFG+/SPFG++ frontier sees the honest distance-to-solve and (b) a collapsed
+    # run can NEVER falsely accept on a tiny denominator (the accept reconciliation happens below,
+    # after the contract `accepted` is read). passed/failed/errors are left untouched — they are real
+    # per-id outcomes; only the denominator + missing are made honest.
+    _collapsed_universe = False
+    if expected_test_count and total < expected_test_count:
+        _collapsed_universe = True
+        missing = max(missing, expected_test_count - passed)
+        total = expected_test_count
+        pass_rate = (passed / total) if total > 0 else 0.0
     # Prefer the evaluation's own contract decision (execution-authoritative).
     accepted = bool(
         getattr(evaluation, "scored_success", None)
@@ -111,6 +133,12 @@ def verification_from_commit0_evaluation(evaluation: Any) -> VerificationResult:
                      or _diag_indet
                      or _native_crash)
     if indeterminate:
+        accepted = False
+    # FM-3: an ACCEPT computed on a COLLAPSED gold universe is not a real solve — you cannot be
+    # "solved" without having RUN the full expected-id set. Downgrade to a genuine PARTIAL (a real
+    # residual, NOT indeterminate: the collected ids really did pass), so the frontier banks honest
+    # partial progress while a false full-solve can never slip through on a tiny denominator.
+    if _collapsed_universe and accepted:
         accepted = False
     # GOLD-SCORING GUARD (belt-and-suspenders): under the REQUIRED gold contract the gold path
     # sets scoring_source="commit0_test_ids". An ACCEPT produced by any other source (e.g. the
@@ -155,6 +183,9 @@ def verification_from_commit0_evaluation(evaluation: Any) -> VerificationResult:
         reason=(f"commit0 accept rejected: non-gold scoring_source={scoring_source!r} "
                 "(visible-suite fallback, not gold expected-id match)" if _nongold_downgrade
                 else ("commit0 scoring inconclusive (harness/parser/env failure)" if indeterminate
-                      else (None if accepted else "commit0 visible suite not fully green"))),
+                      else (f"commit0 gold universe collapsed: only {passed + failed + errors}/"
+                            f"{expected_test_count} expected ids collected (missing={missing})"
+                            if _collapsed_universe
+                            else (None if accepted else "commit0 visible suite not fully green")))),
         failing_nodeids=failing_nodeids, failure_excerpts=excerpts,
     )

@@ -121,6 +121,39 @@ def test_full_green_still_accepts():
     assert vr.accepted is True and vr.indeterminate is False
 
 
+# --------------------------------------------------------------------------- #
+# (1b) FM-3 — collapsed gold universe (babel gold_total=10) reconcile
+# --------------------------------------------------------------------------- #
+def test_fm3_collapsed_universe_never_accepts_on_subset():
+    # collection-collapse: only 10 of 5663 expected ids COLLECTED and all 10 passed. Without the
+    # authoritative count this would falsely ACCEPT (missing==0 on a tiny denominator). With it, the
+    # denominator is lifted to the true universe and missing accounts the uncollected ids.
+    ev = _fake_eval(passed=10, failed=0, errors=0, total_tests=10, missing_expected=0,
+                    pass_rate=1.0, returncode=0, scored_success=True)
+    vr = verification_from_commit0_evaluation(ev, expected_test_count=5663)
+    assert vr.accepted is False                    # cannot be solved without running the full set
+    assert vr.indeterminate is False               # genuine PARTIAL, not a harness failure
+    assert vr.total == 5663 and vr.passed == 10
+    assert vr.missing_expected == 5653
+    assert vr.pass_rate == pytest.approx(10 / 5663)
+
+
+def test_fm3_full_universe_unaffected():
+    # when the denominator already equals the authoritative count, nothing changes (still accepts).
+    ev = _fake_eval(passed=5663, failed=0, errors=0, total_tests=5663, missing_expected=0,
+                    pass_rate=1.0, returncode=0, scored_success=True)
+    vr = verification_from_commit0_evaluation(ev, expected_test_count=5663)
+    assert vr.accepted is True and vr.total == 5663
+
+
+def test_fm3_no_authoritative_count_is_legacy_behavior():
+    # default expected_test_count=0 -> guard inactive (existing callers unchanged).
+    ev = _fake_eval(passed=10, failed=0, errors=0, total_tests=10, pass_rate=1.0,
+                    returncode=0, scored_success=True)
+    vr = verification_from_commit0_evaluation(ev)
+    assert vr.accepted is True and vr.total == 10
+
+
 def test_benchmark_native_crash_helper():
     from apex.evaluation.commit0_benchmark import _commit0_returncode_is_native_crash
     assert _commit0_returncode_is_native_crash(139) is True

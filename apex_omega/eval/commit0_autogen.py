@@ -442,7 +442,10 @@ def run_autogen_cell(
                     accepted=False, score=0.0, reason=f"evaluate_repo failed: {exc}",
                     indeterminate=True,
                 )
-            return verification_from_commit0_evaluation(evaluation)
+            # FM-3: pass the AUTHORITATIVE static gold-id count so a collapsed-collection denominator
+            # (babel gold_total=10) can never falsely accept and the frontier sees the true distance.
+            return verification_from_commit0_evaluation(
+                evaluation, expected_test_count=len(expected_ids))
 
         # --- worker fleet from the arm's llm_configs ---------------------------
         worker_specs = _worker_specs_from_cfg(cfg_dict)
