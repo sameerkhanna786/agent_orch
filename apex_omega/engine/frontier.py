@@ -172,9 +172,11 @@ class FrontierTracker:
         self.wall_at_best = None     # None => clock UNSTARTED; 0.0 on first valid; reset on rise
         self.indet_streak = 0
         self.indet_total = 0
+        self.best_min_errors: Optional[int] = None  # Fix 1: secondary collection-error frontier
         self.history: List[Tuple[int, int]] = []  # (valid_idx, pass_count) at each strict rise
 
-    def ingest(self, pass_count: int, pass_rate: float, valid: bool, wall_delta: float) -> None:
+    def ingest(self, pass_count: int, pass_rate: float, valid: bool, wall_delta: float,
+               errors: int = -1) -> None:
         if not valid:
             # INDETERMINATE: neutral to F and to BOTH patience clocks.
             self.indet_streak += 1
@@ -188,6 +190,16 @@ class FrontierTracker:
         pass_count = int(pass_count)
         pass_rate = float(pass_rate)
         improved = (pass_count > self.best) or (pass_rate > self.best_rate + 1e-9)
+        # Fix 1 (governor audit): a strict drop in the collection-error count is genuine
+        # implementation progress on a not-yet-passing large repo — it resets BOTH patience arms
+        # WITHOUT advancing the gold frontier (self.best is unchanged below when only this fires).
+        if errors is not None and int(errors) >= 0:
+            e = int(errors)
+            if self.best_min_errors is None:
+                self.best_min_errors = e        # establish baseline (not itself an improvement)
+            elif e < self.best_min_errors:
+                self.best_min_errors = e
+                improved = True
         if pass_count > self.best:
             self.best = pass_count
             self.history.append((self.valid, pass_count))
@@ -252,15 +264,21 @@ class FrontierState:
     last_advance_epoch: Optional[float] = None
     mode: str = "C"
     history: List[Tuple[int, int]] = field(default_factory=list)
+    # Fix 1: explicit valid-measurement index of the last improvement (gold OR collection-error
+    # frontier). When set it overrides the history-derived index so a non-gold collection-error
+    # rise also resets the valid-measurement arm. None => fall back to history (Mode-A unchanged).
+    valid_at_best_idx: Optional[int] = None
 
     def as_state(self) -> dict:
         if self.latest_valid_epoch is not None and self.last_advance_epoch is not None:
             secs = max(0.0, self.latest_valid_epoch - self.last_advance_epoch)
         else:
             secs = 0.0
-        # valid_measurements_since_improvement is reconstructed via the history index of
-        # the last strict rise (count of valid measurements after it).
-        if self.history:
+        # valid_measurements_since_improvement is reconstructed via the index of the last
+        # improvement (explicit valid_at_best_idx if set, else the last gold-rise in history).
+        if self.valid_at_best_idx is not None:
+            valid_at_best = self.valid_at_best_idx
+        elif self.history:
             valid_at_best = self.history[-1][0]
         else:
             valid_at_best = 0
@@ -326,6 +344,7 @@ def frontier_from_wal(rundir) -> FrontierState:
     fs = FrontierState(mode="C")
     best = -1
     best_rate = -1.0
+    best_min_errors = None   # Fix 1: secondary collection-error frontier (Mode-C relaunch gate)
     valid_idx = 0
     for wal in wals:
         for rec in _iter_jsonl(wal):
@@ -347,7 +366,18 @@ def frontier_from_wal(rundir) -> FrontierState:
             valid_idx += 1
             pc = int(val.get("passed", 0) or 0)
             pr = float(val.get("pass_rate", 0.0) or 0.0)
+            _e = val.get("errors")
+            err = int(_e) if _e is not None else -1
             improved = (pc > best) or (pr > best_rate + 1e-9)
+            # Fix 1: a strict drop in collection errors is implementation progress -> resets BOTH
+            # patience arms (wall via last_advance_epoch, valid via valid_at_best_idx) without
+            # advancing the gold frontier (best/history unchanged when only this fires).
+            if err >= 0:
+                if best_min_errors is None:
+                    best_min_errors = err       # establish baseline (not itself an improvement)
+                elif err < best_min_errors:
+                    best_min_errors = err
+                    improved = True
             if pc > best:
                 best = pc
                 fs.history.append((valid_idx, pc))
@@ -355,6 +385,7 @@ def frontier_from_wal(rundir) -> FrontierState:
                 best_rate = pr
             if improved:
                 fs.last_advance_epoch = fs.latest_valid_epoch
+                fs.valid_at_best_idx = valid_idx
             fs.latest_valid_epoch = fs.latest_valid_epoch  # epoch anchored by ladder poll
     fs.gold_frontier = max(best, 0)
     return fs

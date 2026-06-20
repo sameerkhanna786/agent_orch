@@ -306,9 +306,15 @@ class OrchestrationContext:
         # (default UNBOUNDED; always-on guards = per-run agent ceiling + plateau). The
         # plateau state below makes a no-clock fan-out loop terminate without discarding
         # work; ctx.parallel raises PlateauStop once halted (caught by autosolve).
+        # Fix 3 (governor audit): unify the harness-stall ceiling across tiers. The in-cell
+        # governor defaulted harness_stall_cut=8 while the ladder tier uses INDET_CEIL (24), giving
+        # two different harness walls. Source the shared frontier default so both tiers agree.
+        from ..engine.frontier import frontier_defaults
+        _indet_ceil = frontier_defaults()[2]
         self.governor = RunGovernor(
             engine=engine, agent_ceiling=engine.max_total_agents,
             token_budget=engine.budget.total, agent_budget=self.max_agents, plateau_k_dry=2,
+            harness_stall_cut=_indet_ceil,
         )
         # Backbone 2.4 CUT-LOSSES detector state. Progress is tracked on the BEST-so-far
         # distance-to-solve (gold ids green = ``_best_gold_passed``; raw pass_rate as the
@@ -318,6 +324,15 @@ class OrchestrationContext:
         self._dry_rounds = 0                  # telemetry: consecutive dry WAVES (not the cut unit)
         self._best_pass_rate = 0.0
         self._best_gold_passed = 0
+        # Fix 1 (governor audit): SECONDARY implementation-progress frontier = the min collection-
+        # error count seen in a VALID measurement ("distance to first collect"). A strict DROP
+        # (errors 5091->4000 as modules/imports get implemented) counts as progress that RESETS the
+        # patience arms + the sterile streak — WITHOUT banking a gold solve (best_gold_passed stays
+        # the only acceptance number). This stops the governor from cutting a large monolithic-import
+        # repo (whose gold suite cannot collect until much is implemented) as sterile/no-progress
+        # while it is genuinely progressing. A genuinely flat run (errors 5091->5091) is unaffected
+        # and still cut correctly.
+        self._best_min_errors = None
         self._nonresult_streak = 0
         self._sterile_streak = 0
         self._seen_shas: set = set()
@@ -530,6 +545,7 @@ class OrchestrationContext:
         round_gold = self._best_gold_passed
         round_pass = self._best_pass_rate
         frontier_cand = None     # the candidate that pushed the gold frontier up this batch
+        round_min_errors = None  # Fix 1: lowest VALID collection-error count this batch (secondary frontier)
         n_attempts = len(out)
         n_nonresult = 0          # attempts that produced no usable work
         n_sterile = 0            # attempts with an empty diff OR a diff already seen this run
@@ -567,6 +583,11 @@ class OrchestrationContext:
                     self._valid_wall_at_best = 0.0   # first VALID measurement STARTS the clock
                     self._wall_started = True
                 self._valid_wall_accum += self._valid_wall_increment
+                # Fix 1: track the lowest VALID collection-error count this batch (errors =
+                # erroring/uncollected gold tests). A new low across batches = real progress toward
+                # the first collect/pass on a large not-yet-collecting repo.
+                _err = int(m.get("errors", 0) or 0)
+                round_min_errors = _err if round_min_errors is None else min(round_min_errors, _err)
             fs = m.get("finalization_status")
             if bool(m.get("indeterminate")) or (
                     fs in ("policy_violation", "infra_nonresult", "timeout") and gp <= 0 and pr <= 0.0):
@@ -582,7 +603,23 @@ class OrchestrationContext:
         # PROGRESS = strict improvement in BEST distance-to-solve (gold ids green PRIMARY,
         # raw pass_rate SECONDARY). BEST-not-LAST: a dip that does not beat the best is dry,
         # not a regression cut; a high-but-flat pass_rate with no new gold is also dry.
-        improved = (round_gold > self._best_gold_passed) or (round_pass > self._best_pass_rate + 1e-9)
+        # Fix 1 (governor audit): a strict DROP in the collection-error frontier (more of the gold
+        # suite now collects) is genuine implementation progress on a not-yet-passing large repo.
+        # It counts as a frontier rise for the patience/sterile clocks but is NEVER a gold solve
+        # (best_gold_passed is unchanged below when only this fires). A flat run (errors 5091->5091)
+        # gets no credit and is still cut correctly.
+        # establish the collection-error baseline WITHOUT crediting it (the first measurement is not
+        # itself progress — same convention as gold); only a STRICT DROP from an established baseline
+        # counts, so a small already-collecting repo (errors==0 throughout) is wholly unaffected.
+        secondary_improved = False
+        if round_min_errors is not None:
+            if self._best_min_errors is None:
+                self._best_min_errors = round_min_errors
+            elif round_min_errors < self._best_min_errors:
+                secondary_improved = True
+        improved = ((round_gold > self._best_gold_passed)
+                    or (round_pass > self._best_pass_rate + 1e-9)
+                    or secondary_improved)
         if improved:
             # record a STRICT gold-count rise in the frontier history (telemetry / ledger).
             if round_gold > self._best_gold_passed:
@@ -596,6 +633,11 @@ class OrchestrationContext:
                         phase_id="frontier")
             self._best_gold_passed = round_gold
             self._best_pass_rate = round_pass
+            # Fix 1: advance the secondary collection-error frontier on a strict drop (baseline was
+            # established above). Never banks a gold solve — best_gold_passed is unchanged when only
+            # the secondary fired.
+            if secondary_improved:
+                self._best_min_errors = round_min_errors
             self._dry_rounds = 0
             self._tokens_at_best = self._engine.budget.spent()
             self._agents_at_best = self._engine.agents_used()
