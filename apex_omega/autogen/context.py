@@ -193,7 +193,10 @@ def classify_attempt_integrity(res) -> dict:
     diff = str(getattr(res, "fs_diff", "") or "")
     el = err.lower()
     signals = []
-    if fs == "policy_violation" or "outside the root" in el or "permission denied" in el:
+    if (fs == "policy_violation" or "outside the root" in el or "permission denied" in el
+            # a DOWNGRADED workspace-discovery escape completes cleanly; its soft reason (folded into
+            # error by the v1 adapter, T1) still names the denied out-of-workspace discovery.
+            or "outside the rollout workspace" in el or "workspace_discovery" in el):
         signals.append({"kind": "sandbox_escape", "detail": (err or fs)[:200]})
     if any(t in el for t in ("download", "clone", "pip install", "uv pip", "fetch", "pypi", "upstream")):
         signals.append({"kind": "fetch_attempt", "detail": err[:200]})

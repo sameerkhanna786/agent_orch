@@ -197,6 +197,22 @@ class V1Session:
         diag = getattr(res, "backend_diagnostics", None) or {}
         if isinstance(diag, dict):
             session_id = diag.get("session_id") or diag.get("thread_id")
+        # T1 (telemetry preservation): a DOWNGRADED workspace-discovery violation lets the rollout
+        # COMPLETE cleanly (error=None), but the soft record lives only in res.timeout_audit and the
+        # v1->omega adapter otherwise drops it — so the integrity-log sandbox_escape signal would
+        # silently vanish for every downgraded out-of-workspace read. Fold a compact summary of the
+        # soft policy violations into `error` (an already-classified field) so
+        # classify_attempt_integrity keeps firing. (The denied access already happened; this only
+        # restores telemetry — it does not change accept/finalization.)
+        _error = getattr(res, "error", None)
+        if not _error:
+            _audit = getattr(res, "timeout_audit", None) or {}
+            _soft = _audit.get("soft_policy_violations") if isinstance(_audit, dict) else None
+            if _soft:
+                _n = len(_soft) if isinstance(_soft, list) else 1
+                _first = (_soft[0] if isinstance(_soft, list) and _soft else _soft)
+                _reason = (_first.get("reason") if isinstance(_first, dict) else str(_first)) or ""
+                _error = f"soft policy: {_n} workspace_discovery violation(s); {str(_reason)[:200]}"
         return ExecResult(
             final_message=getattr(res, "text", "") or "",
             structured_output=getattr(res, "parsed_json", None),
@@ -209,7 +225,7 @@ class V1Session:
             cli_version=self.cli_version,
             ok=bool(getattr(res, "success", False)),
             finalization_status=finalization,
-            error=getattr(res, "error", None),
+            error=_error,
             latency_seconds=time.monotonic() - start,
         )
 

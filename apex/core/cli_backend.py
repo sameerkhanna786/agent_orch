@@ -1278,6 +1278,30 @@ _WORKSPACE_POLICY_SYSTEM_TARGET_PREFIXES: tuple[str, ...] = (
     "cli_airgapped_homes/",
     "fastzip-castree-",
 )
+# Env-aware workspace-discovery downgrade (root-cause fix per
+# orchestration_research/WORKSPACE_GUARD_ANALYSIS.md): a monitored read-only discovery command
+# (find/grep/...) that touches the AGENT'S OWN runtime infra (CODEX_HOME / XDG cache / TMPDIR / host
+# ~/.cache) or a READ-ONLY OS root is a benign false-positive — it must be a SOFT
+# ``workspace_discovery`` course-correction, NOT a fatal rollout abort (which contradicts the
+# SANDBOX-NOT-PROMPT deny-don't-kill policy). Reads of a sibling worktree, another cell, the ladder
+# root, or a planted upstream/reference copy stay FATAL by construction (they are NOT under these
+# roots; /tmp + /private/tmp are deliberately EXCLUDED so source-copy cheats remain fatal).
+_WORKSPACE_POLICY_SYSTEM_READONLY_ROOTS: tuple[str, ...] = (
+    "/usr/", "/opt/homebrew/", "/opt/local/", "/System/", "/Library/",
+    "/etc/", "/bin/", "/sbin/",
+)  # EXCLUDES /tmp, /private/tmp, AND /var/folders: the eval's own worktrees / sibling cells /
+# per-rollout TMPDIRs live under those on macOS, so a blanket soft-allow would let a sibling-worktree
+# read ESCAPE isolation. THIS rollout's own TMPDIR stays soft via the env-specific TMPDIR infra root.
+# An extracted/planted upstream reference copy of the real package — a GENUINE cheat surface that
+# stays FATAL even if it sits under an infra root (G1 precedence).
+_WORKSPACE_POLICY_UPSTREAM_REFERENCE_MARKERS: tuple[str, ...] = (
+    "_upstream/", "_upstream.", "_wheel/", "_restore/", "_spec.txt",
+)
+# Env keys whose resolved values are THIS rollout's own infra roots (downgrade-eligible).
+_WORKSPACE_POLICY_AGENT_RUNTIME_ENV_KEYS: tuple[str, ...] = (
+    "HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+    "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME", "OPENCODE_CONFIG_DIR", "TMPDIR",
+)
 _WORKSPACE_POLICY_CONTAINER_SHELL_EXECUTABLES: frozenset[str] = frozenset(
     {
         "/bin/bash",
@@ -8990,15 +9014,16 @@ class CLIModelClient:
                     process_entries,
                     working_dir,
                     target_runtime_enforced=target_runtime_enforced,
+                    runtime_infra_roots=self._agent_runtime_infra_roots(target_runtime_env),
                 )
                 if violation is not None:
                     severity = str(violation.get("severity") or "fatal")
-                    if severity in {"backend_helper", "blocked_by_policy"}:
+                    if severity in {"backend_helper", "blocked_by_policy", "workspace_discovery"}:
                         # Soft violation — log once per (pid, command, target)
                         # tuple, record in audit, but do not abort the task.
                         # The monitored command set is read-only and the target
-                        # is a system-helper path, so the agent's tool call
-                        # cannot mutate state outside the workspace.
+                        # is a system-helper / agent-runtime-infra path, so the
+                        # agent's tool call cannot mutate state outside the workspace.
                         violation_key = (
                             int(violation.get("pid") or 0),
                             str(violation.get("command_name") or ""),
@@ -9174,10 +9199,13 @@ class CLIModelClient:
                                 target_runtime_filesystem_boundary_policy=(
                                     target_runtime_filesystem_boundary_policy
                                 ),
+                                runtime_infra_roots=self._agent_runtime_infra_roots(
+                                    target_runtime_env
+                                ),
                             )
                             if target_violation is not None:
                                 severity = str(target_violation.get("severity") or "fatal")
-                                if severity in {"backend_helper", "blocked_by_policy"}:
+                                if severity in {"backend_helper", "blocked_by_policy", "workspace_discovery"}:
                                     violation_key = (
                                         int(target_violation.get("pid") or 0),
                                         str(target_violation.get("command_name") or ""),
@@ -9774,6 +9802,7 @@ class CLIModelClient:
         process_cwd: Optional[Path],
         path_tokens: list[str],
         working_dir: Path,
+        runtime_infra_roots: tuple[Path, ...] = (),
     ) -> bool:
         if process_cwd is None:
             return False
@@ -9791,12 +9820,23 @@ class CLIModelClient:
                     working_dir=working_dir,
                     process_cwd=process_cwd,
                 )
+                # A read of the agent's OWN runtime infra / read-only OS root does NOT hard-veto the
+                # backend-helper downgrade (root-cause fix); an upstream reference copy (G1) is NOT
+                # infra and still vetoes -> fatal.
+                if self._path_is_agent_runtime_infra(
+                    resolved, runtime_infra_roots=runtime_infra_roots
+                ):
+                    continue
                 if self._path_escapes_workspace(resolved, working_dir=working_dir):
                     return False
         cwd_text = str(process_cwd)
         if any(marker in cwd_text for marker in _WORKSPACE_POLICY_BACKEND_HELPER_MARKERS):
             return True
         if self._path_text_looks_like_backend_runtime_helper(cwd_text):
+            return True
+        # A discovery command merely RUNNING FROM the agent's own runtime infra (codex uv cache,
+        # CODEX_HOME, TMPDIR, ~/.cache) is a benign false-positive, not a fatal escape.
+        if self._path_is_agent_runtime_infra(process_cwd, runtime_infra_roots=runtime_infra_roots):
             return True
         return False
 
@@ -10912,6 +10952,86 @@ class CLIModelClient:
             for marker in _WORKSPACE_POLICY_SYSTEM_TARGET_PREFIXES
         )
 
+    @staticmethod
+    def _agent_runtime_infra_roots(env=None) -> tuple[Path, ...]:
+        """The resolved infra roots of THIS rollout's OWN agent runtime (CODEX_HOME / XDG cache /
+        TMPDIR / HOME, from the fixed per-rollout env) plus the host ~/.cache. A monitored read-only
+        discovery command (find/grep/...) touching a path UNDER one of these is a benign
+        false-positive — it must be a SOFT workspace_discovery course-correction, NOT a fatal abort
+        (root-cause fix: WORKSPACE_GUARD_ANALYSIS.md). Pure function of the env (deterministic/
+        replay-safe); env=None still covers the dominant host ~/.cache false-positive."""
+        roots: list[Path] = []
+        seen: set[str] = set()
+
+        def _add(raw) -> None:
+            if not raw:
+                return
+            try:
+                rp = Path(str(raw)).resolve()
+            except (OSError, ValueError):
+                return
+            t = str(rp)
+            if t == "/" or t in seen:
+                return
+            seen.add(t)
+            roots.append(rp)
+
+        if env:
+            for key in _WORKSPACE_POLICY_AGENT_RUNTIME_ENV_KEYS:
+                try:
+                    _add(env.get(key))
+                except Exception:
+                    continue
+        try:
+            _add(Path.home() / ".cache")
+        except (OSError, RuntimeError):
+            pass
+        return tuple(roots)
+
+    @staticmethod
+    def _path_resolves_to_upstream_reference_copy(path: Optional[Path]) -> bool:
+        """True if `path` is a deliberately planted/extracted UPSTREAM REFERENCE copy of the real
+        package (a genuine cheat surface) — it stays FATAL even under an infra root (G1 precedence).
+        Scoped to explicit upstream/wheel/restore markers so the agent's OWN runtime venv/cache
+        (legit dependency reads — never the real impl in a from-scratch commit0 repo) is NOT swept
+        in; real source-copy cheats live in /tmp, which is excluded from the infra/OS allow-roots and
+        thus stays fatal regardless."""
+        if path is None:
+            return False
+        text = str(path)
+        return any(marker in text for marker in _WORKSPACE_POLICY_UPSTREAM_REFERENCE_MARKERS)
+
+    @classmethod
+    def _path_is_agent_runtime_infra(
+        cls,
+        path: Optional[Path],
+        *,
+        runtime_infra_roots: tuple[Path, ...] = (),
+    ) -> bool:
+        """True if `path` is under THIS rollout's own agent-runtime infra or a read-only OS root
+        (downgrade-eligible benign discovery). G1 PRECEDENCE: a planted upstream reference copy is
+        NEVER infra (stays fatal) even if it sits under an infra root. The existing APEX-managed
+        helper-target downgrade is kept as a strict subset (pure widening, never narrowing)."""
+        if path is None:
+            return False
+        if cls._path_resolves_to_upstream_reference_copy(path):
+            return False
+        try:
+            resolved = Path(path).resolve()
+        except (OSError, ValueError):
+            resolved = None
+        if resolved is not None and runtime_infra_roots:
+            for root in runtime_infra_roots:
+                try:
+                    resolved.relative_to(root)
+                    return True
+                except ValueError:
+                    continue
+        text = str(resolved if resolved is not None else path)
+        if text.startswith(_WORKSPACE_POLICY_SYSTEM_READONLY_ROOTS):
+            return True
+        return cls._path_resolves_to_system_helper_target(path)
+
     def _process_tree_workspace_policy_violation(
         self,
         process_entries: dict[int, dict[str, Any]],
@@ -10921,6 +11041,7 @@ class CLIModelClient:
         target_runtime_git_history_policy: str = "blocked",
         target_runtime_source_network_policy: str = "unspecified",
         target_runtime_filesystem_boundary_policy: str = "policy_enforced",
+        runtime_infra_roots: tuple[Path, ...] = (),
     ) -> Optional[dict[str, Any]]:
         workspace_root = Path(working_dir).resolve()
         git_history_structural = _target_runtime_git_history_is_structural(
@@ -11130,6 +11251,7 @@ class CLIModelClient:
                     process_cwd=process_cwd,
                     path_tokens=path_tokens,
                     working_dir=workspace_root,
+                    runtime_infra_roots=runtime_infra_roots,
                 )
                 return {
                     "pid": pid,
@@ -11137,7 +11259,7 @@ class CLIModelClient:
                     "command": command,
                     "cwd": str(process_cwd) if process_cwd is not None else None,
                     "likely_backend_helper": likely_backend_helper,
-                    "severity": "backend_helper" if likely_backend_helper else "fatal",
+                    "severity": "workspace_discovery" if likely_backend_helper else "fatal",
                     "reason": (
                         (
                             "CLI backend helper executed repository discovery outside the rollout workspace: "
@@ -11166,12 +11288,22 @@ class CLIModelClient:
                     working_dir=workspace_root,
                 ):
                     continue
-                # Only APEX-managed helper paths are downgraded. Sibling
-                # task tempdirs, arbitrary /tmp traversal, and broad system
-                # paths remain fatal policy violations.
-                target_is_system_helper = self._path_resolves_to_system_helper_target(resolved_path)
-                likely_backend_helper = target_is_system_helper
-                severity = "backend_helper" if likely_backend_helper else "fatal"
+                # Downgrade benign reads of the agent's OWN runtime infra (CODEX_HOME / XDG cache /
+                # TMPDIR / ~/.cache) and read-only OS roots to a SOFT workspace_discovery
+                # course-correction (root-cause fix: WORKSPACE_GUARD_ANALYSIS.md). A planted UPSTREAM
+                # reference copy (G1) and reads of a sibling worktree / another cell / arbitrary
+                # /tmp traversal stay FATAL by construction.
+                if self._path_resolves_to_upstream_reference_copy(resolved_path):
+                    likely_backend_helper = False
+                    severity = "fatal"
+                elif self._path_is_agent_runtime_infra(
+                    resolved_path, runtime_infra_roots=runtime_infra_roots
+                ):
+                    likely_backend_helper = True
+                    severity = "workspace_discovery"
+                else:
+                    likely_backend_helper = False
+                    severity = "fatal"
                 reason_prefix = (
                     "CLI backend helper executed repository discovery outside the rollout workspace: "
                     if likely_backend_helper
@@ -11277,12 +11409,14 @@ class CLIModelClient:
             target_runtime_git_history_policy=target_runtime_git_history_policy,
             target_runtime_source_network_policy=target_runtime_source_network_policy,
             target_runtime_filesystem_boundary_policy=(target_runtime_filesystem_boundary_policy),
+            runtime_infra_roots=self._agent_runtime_infra_roots(env),
         )
         if target_violation is None:
             return None
         if str(target_violation.get("severity") or "fatal") in {
             "backend_helper",
             "blocked_by_policy",
+            "workspace_discovery",
         }:
             return None
         return _target_runtime_completion_policy_audit_base(
