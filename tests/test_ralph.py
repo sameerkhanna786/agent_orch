@@ -1,8 +1,10 @@
 """Ralph-wiggum baseline + the cut-losses detector applied to it.
 
-Ralph is a vanilla iterate-until-done loop: ONE sequential lineage, fed the failing tests
-each turn, NO scout/author/patterns. It shares the SAME governor cut-losses detector as
-omega, so naive persistence stops the instant it stops making progress."""
+Ralph is a vanilla iterate-until-done loop: ONE sequential lineage re-running the IDENTICAL
+prompt each turn (NO failing-test feedback / excerpts / diff-paste — that would be Reflexion)
+in a PERSISTENT workspace (the accumulated diff is pre-applied each turn), NO scout/author/
+patterns. It shares the SAME governor cut-losses detector as omega, so naive persistence stops
+the instant it stops making progress."""
 
 from __future__ import annotations
 
@@ -40,6 +42,14 @@ def _ctx(score_fn, responder, **kw):
         base_commit=None, score_fn=score_fn, prompt_builder=lambda c, i, s: "x", **kw)
 
 
+def _diff(n: int) -> str:
+    # a REAL git diff vs the base mod.py (return 0). Faithful ralph PRE-APPLIES the carried diff
+    # each turn, so the test must hand it a valid applyable diff (not a fake string). Every _diff(n)
+    # is base->return-n, so it always applies cleanly onto a fresh base worktree.
+    return ("diff --git a/mod.py b/mod.py\n--- a/mod.py\n+++ b/mod.py\n"
+            "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return %d\n" % n)
+
+
 def test_ralph_orchestration_is_frozen_directly(monkeypatch):
     # APEX_OMEGA_ORCHESTRATION=ralph freezes the fixed ralph workflow (no scout, no author).
     monkeypatch.setenv("APEX_OMEGA_ORCHESTRATION", "ralph")
@@ -72,10 +82,10 @@ def test_ralph_loop_iterates_until_accept():
     def responder(task, session):
         n["i"] += 1
         Path(session.cwd, "mod.py").write_text(f"def f():\n    return {n['i']}\n")
-        # distinct fs_diff each turn -> distinct score-journal key -> the score sequence advances
-        # (the FakeExecutor passes fs_diff through; only the real executor computes it from the wt)
+        # distinct REAL diff each turn -> distinct score-journal key (the score sequence advances)
+        # AND a valid diff the NEXT iteration can pre-apply as the carried workspace.
         return ExecResult(final_message="patched", ok=True, finalization_status="completed",
-                          fs_diff=f"--- diff {n['i']} ---", usage=TokenUsage(input=1, output=1))
+                          fs_diff=_diff(n["i"]), usage=TokenUsage(input=1, output=1))
 
     ctx = _ctx(score_fn, responder)
     winner = ctx.ralph_loop()
@@ -94,9 +104,10 @@ def test_ralph_loop_cut_when_stuck_and_does_not_run_forever():
 
     def responder(task, session):
         Path(session.cwd, "mod.py").write_text("def f():\n    return 99\n")
-        # identical fs_diff every turn -> sterile-diff hard cut
+        # IDENTICAL real diff every turn -> applies cleanly as the carry AND repeats -> sterile-diff
+        # hard cut (the agent keeps producing the same non-progressing patch).
         return ExecResult(final_message="x", ok=True, finalization_status="completed",
-                          fs_diff="--- same diff ---", usage=TokenUsage(input=1, output=1))
+                          fs_diff=_diff(99), usage=TokenUsage(input=1, output=1))
 
     ctx = _ctx(score_fn, responder, max_agents=100)
     winner = ctx.ralph_loop()

@@ -1905,33 +1905,38 @@ class OrchestrationContext:
             meta_extra={"residual_repair": True},
         )
 
-    # ---- RALPH-WIGGUM baseline: naive persistence with feedback on one lineage ----
+    # ---- RALPH-WIGGUM baseline: naive persistence, the IDENTICAL prompt every iteration ----
     def ralph_loop(self, *, id_base: int = 800000) -> Optional[Candidate]:
-        """The ralph-wiggum baseline body: ONE sequential lineage, fed the failing tests
-        each turn — naive iterate-until-done persistence. NO scout / author / patterns /
-        parallel waves. Iteration 0 is a fresh solve; each later iteration REPAIRS the
-        running best, seeded with the full accumulated diff + the failing test ids
-        (Reflexion-style feedback). Each iteration is routed through ``ctx.parallel`` as a
-        "wave of one", so the SAME cut-losses detector that governs omega governs ralph —
-        an apples-to-apples persistence test. Stops on accept, on a governor cut (no
-        progress / dead state / ceiling), and returns the best banked candidate (or
-        abstains — never fakes a pass).
+        """The ralph-wiggum baseline: ONE sequential lineage that re-runs the BYTE-IDENTICAL solve
+        prompt every iteration in a PERSISTENT workspace — faithful naive iterate-until-done. The
+        loop injects NOTHING between turns: NO failing-test ids, NO failure excerpts, NO diff-paste
+        (any of those would make it Reflexion, not ralph). Each iteration runs in a FRESH worktree
+        (a fresh context window) with the accumulated edits PRE-APPLIED — exactly replicating a ralph
+        ``run.sh`` that re-invokes ``-p "$(cat prompt.md)"`` in the SAME directory each turn. The
+        agent re-discovers state by reading the carried-forward workspace and runs the tests itself
+        (the prompt already tells it to). NO scout / author / patterns / decomposition / parallel
+        waves. Each iteration is a "wave of one" through ``ctx.parallel`` so the SAME SPFG++ governor
+        that governs omega governs ralph (apples-to-apples). Stops on accept or a governor cut;
+        returns the best banked candidate (no silent loss in REPORTING — the LOOP itself is naive and
+        always builds on the last state, never a cherry-picked best).
 
-        Distinct from ``baseline`` (K independent THROWAWAY parallel rollouts, no feedback)
-        and from omega (scout/author/parallel waves): ralph is sequential persistence on a
-        growing single lineage. The full parent diff is carried (``_repair_diff_limit``
-        raised) so iteration N+1 builds on N's work rather than a truncated summary."""
-        # naive-persistence fidelity: carry the WHOLE accumulated diff forward, not a hint.
-        self._repair_diff_limit = max(self._repair_diff_limit, 200_000)
+        Distinct from ``baseline`` (K independent THROWAWAY rollouts, no persistence) and from omega
+        (scout/author/decompose/parallel waves)."""
+        # Build the prompt ONCE so every iteration re-runs the byte-identical text (ralph fidelity:
+        # the prompt never varies by attempt index, strategy, or accumulated feedback).
+        ralph_strategy = self.strategies[0] if getattr(self, "strategies", None) else "minimal"
+        fixed_prompt = self._prompt_builder(self, id_base, ralph_strategy)
+        # One agent type for the whole lineage (a single naive worker), pinned so the loop does not
+        # rotate vendors by attempt index.
+        ralph_vendor = self._worker_specs[0].vendor if self._worker_specs else None
         lineage: list = []
-        cur: Optional[Candidate] = None
+        carry = ""                       # the PERSISTENT WORKSPACE (accumulated edits) re-applied each turn
         k = 0
         while True:
             aid = id_base + k
-            if cur is None:
-                thunk = (lambda a=aid: self.solve_attempt(attempt_id=a))
-            else:
-                thunk = (lambda p=cur, a=aid: self.repair_attempt(p, attempt_id=a))
+            thunk = (lambda a=aid, c=carry: self._attempt(
+                aid=a, prefix="a", node_prefix="attempt", prompt=fixed_prompt,
+                strategy=ralph_strategy, vendor=ralph_vendor, model=None, pre_apply_diff=c))
             try:
                 out = self.parallel([thunk])   # raises CutLosses/PlateauStop once halted
             except PlateauStop:                 # CutLosses is a subclass -> also caught
@@ -1941,10 +1946,12 @@ class OrchestrationContext:
             if cand is None:
                 continue
             lineage.append(cand)
-            # carry the STRONGEST state forward so the next turn repairs the best, not a dip.
-            if (cur is None or cand.accepted
-                    or (cand.public_signal_score or 0.0) >= (cur.public_signal_score or 0.0)):
-                cur = cand
+            # PERSISTENT WORKSPACE: carry the LAST real (non-indeterminate, non-empty) diff forward.
+            # Naive persistence builds on the previous iteration's state — NOT a cherry-picked best —
+            # so a carry-conflict / infra non-result / no-edit turn leaves the prior workspace intact.
+            m = getattr(cand, "meta", {}) or {}
+            if not m.get("indeterminate") and not m.get("carry_conflict") and (cand.diff or "").strip():
+                carry = cand.diff
             if cand.accepted:
                 break
         return self.select(lineage)
