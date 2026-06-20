@@ -188,6 +188,11 @@ def run_autogen_cell(
     # regardless of whether the caller passed a relative --run-dir / LADDER_DIR.
     out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    # Cell-scoped workspace-guard severity (FM-1): export THIS cell's root so the CLI policy guard
+    # treats read-only discovery anywhere under it (repo / runtime / sibling-module worktrees) as a
+    # SOFT course-correction rather than a fatal abort. Other cells + planted upstream copies stay
+    # FATAL. Set in this cell process's env; the in-process guard reads it via _agent_runtime_infra_roots.
+    os.environ["APEX_CELL_ROOT"] = str(out)
 
     def _err(msg: str, **extra) -> dict:
         # Mark a NON-result so _cell_status classifies it RESULT_INFRA_NONRESULT

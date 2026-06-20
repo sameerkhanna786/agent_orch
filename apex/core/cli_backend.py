@@ -1295,7 +1295,9 @@ _WORKSPACE_POLICY_SYSTEM_READONLY_ROOTS: tuple[str, ...] = (
 # An extracted/planted upstream reference copy of the real package — a GENUINE cheat surface that
 # stays FATAL even if it sits under an infra root (G1 precedence).
 _WORKSPACE_POLICY_UPSTREAM_REFERENCE_MARKERS: tuple[str, ...] = (
-    "_upstream/", "_upstream.", "_wheel/", "_restore/", "_spec.txt",
+    # bare segment forms (FM-9) so a trailing-slash-less operand like `/tmp/pydantic_upstream` still
+    # matches the cheat marker (errs toward FATAL = isolation-safe).
+    "_upstream", "_wheel", "_restore", "_spec.txt",
 )
 # Env keys whose resolved values are THIS rollout's own infra roots (downgrade-eligible).
 _WORKSPACE_POLICY_AGENT_RUNTIME_ENV_KEYS: tuple[str, ...] = (
@@ -10982,6 +10984,17 @@ class CLIModelClient:
                     _add(env.get(key))
                 except Exception:
                     continue
+        # CELL-SCOPED soft root (FM-1, the dominant ~91%-of-aborts false-positive class): THIS
+        # rollout's whole CELL tree — its repo, runtime, AND sibling-MODULE worktrees, all under one
+        # cell dir that often lives under /private/tmp (excluded from the OS readonly roots) — is
+        # benign to read-only-discover (same task, not cross-contamination; the worktree-shadow +
+        # no-network still prevent any false solve). Only OTHER cells (not under this root) and
+        # planted upstream copies (G1) stay FATAL. The eval exports APEX_CELL_ROOT = the cell dir;
+        # read it from the passed env OR os.environ (the cell + this guard share a process).
+        try:
+            _add((env.get("APEX_CELL_ROOT") if env else None) or os.environ.get("APEX_CELL_ROOT"))
+        except Exception:
+            pass
         try:
             _add(Path.home() / ".cache")
         except (OSError, RuntimeError):

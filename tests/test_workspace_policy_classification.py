@@ -85,7 +85,27 @@ def test_upstream_reference_copy_detection():
     assert CLIModelClient._path_resolves_to_upstream_reference_copy(Path("/tmp/pydantic_upstream/x")) is True
     assert CLIModelClient._path_resolves_to_upstream_reference_copy(Path("/x/mimesis_wheel/y")) is True
     assert CLIModelClient._path_resolves_to_upstream_reference_copy(Path("/x/_restore/y")) is True
+    # FM-9: bare segment form (no trailing slash) still matches the cheat marker
+    assert CLIModelClient._path_resolves_to_upstream_reference_copy(Path("/tmp/pydantic_upstream")) is True
     assert CLIModelClient._path_resolves_to_upstream_reference_copy(Path("/x/runtime/home/.cache/uv")) is False
+
+
+def test_cell_scoping_same_cell_soft_other_cell_fatal():
+    # FM-1: APEX_CELL_ROOT makes THIS cell's whole tree (repo/runtime/sibling-module worktrees) SOFT,
+    # while a DIFFERENT cell, the ladder root above it, and a planted upstream copy stay FATAL.
+    cells = Path(tempfile.mkdtemp()) / "ladder" / "cellA" / "cells" / "autogen_orchestrator__repo"
+    (cells / "worktrees" / "wt_m1").mkdir(parents=True, exist_ok=True)
+    (cells / "worktrees" / "wt_m2").mkdir(parents=True, exist_ok=True)
+    (cells / "runtime" / "home" / ".cache").mkdir(parents=True, exist_ok=True)
+    env = {"CODEX_HOME": str(cells / "runtime" / "home"), "APEX_CELL_ROOT": str(cells)}
+    roots = CLIModelClient._agent_runtime_infra_roots(env)
+    infra = lambda p: CLIModelClient._path_is_agent_runtime_infra(Path(p), runtime_infra_roots=roots)
+    assert infra(str(cells / "worktrees" / "wt_m2" / "x.py")) is True           # same-cell sibling module
+    assert infra(str(cells / "runtime" / ".venv" / "site-packages" / "y")) is True  # cell runtime
+    other = cells.parent / "autogen_orchestrator__OTHER" / "worktrees" / "wt_x" / "repo"
+    assert infra(str(other)) is False                                          # DIFFERENT cell -> fatal
+    assert infra(str(cells.parent.parent.parent)) is False                     # ladder root -> fatal
+    assert infra(str(cells / "worktrees" / "wt_m1" / "pydantic_upstream" / "p")) is False  # G1 under cell -> fatal
 
 
 def test_infra_check_backcompat_no_roots():
