@@ -1664,6 +1664,7 @@ class OrchestrationContext:
         fan_base = 734000 + pidx * 4000
         rep_base = 711000 + pidx * 4000
         carry = carry_diff
+        cands: list = []
         if mods:
             cands = self.fanout_modules(mods, carry_diff=carry, extra_brief=contract, id_base=fan_base)
             red = self.reduce_residuals(cands, carry_diff=carry, scope_ids=scope_ids)
@@ -1683,6 +1684,26 @@ class OrchestrationContext:
             red = self.reduce_residuals([c], carry_diff=carry, scope_ids=scope_ids)
             if red.get("merged_diff"):
                 carry = red["merged_diff"]
+            # merge-reduce v2 in the PHASED path too: a coupled plateau within a phase switches to the
+            # coherent integrator (ralph-on-the-carry) scoped to THIS phase's gold ids, so the hybrid
+            # arms get the same coupling fix as the converge default (keeps the arms apples-to-apples).
+            if self.coupled_plateau(red, cands):
+                self.log("coupled plateau in phase %d -> coherent integrator" % pidx)
+                w = self.ralph_loop(id_base=812000 + pidx * 2000, seed_carry=self.carry_best(),
+                                    brief=self.integrator_brief(mods, scope_ids))
+                if w is not None:
+                    wm = getattr(w, "meta", {}) or {}
+                    wfail = {str(x) for x in (wm.get("failing_nodeids") or [])}
+                    green = [s for s in scope_ids if s not in wfail]
+                    return {
+                        "merged_diff": (w.diff or carry),
+                        "residual": list(wm.get("failing_nodeids") or []),
+                        "phase_passed": bool(scope_ids and len(green) == len(scope_ids)
+                                             and not wm.get("indeterminate")),
+                        "phase_pass_count": len(green), "phase_total": len(scope_ids),
+                        "accepted_full": bool(getattr(w, "accepted", False)),
+                        "candidate": w, "conflicts": list(red.get("conflicts") or []),
+                    }
         return {
             "merged_diff": carry, "residual": list(red.get("residual_failing_ids") or []),
             "phase_passed": bool(red.get("phase_passed")),

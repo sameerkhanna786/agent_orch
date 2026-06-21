@@ -462,6 +462,44 @@ def test_coupled_plateau_disjoint_and_flag_off(monkeypatch):
                                 "conflicts": ["a", "b"], "advanced": False}, [ca, cb]) is False
 
 
+def test_run_phase_routes_to_integrator_on_coupled_plateau(monkeypatch):
+    # the PHASED path (hybrid arms) must ALSO switch to the coherent integrator on a coupled plateau,
+    # not just the converge default. Stub the heavy seams + force coupled_plateau -> verify the
+    # integrator (ralph_loop) is invoked, seeded by carry_best, and its candidate becomes the result.
+    repo = _two_module_repo()
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
+    ctx = _ctx(eng, repo, lambda wt: VerificationResult())
+    ctx.repo_map["decomposition"] = {"modules": [{"module": "mod_a", "gold_test_ids": ["t1"]}]}
+    from apex_omega.kernel.verify import candidate_from_verification
+    wcand = candidate_from_verification(
+        candidate_id="integ", diff="--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n",
+        vr=VerificationResult(passed=3, total=5), meta={"gold_passed": 3, "failing_nodeids": ["t4", "t5"]})
+    spy = {"ralph": 0, "seed": None, "brief": None}
+    monkeypatch.setattr(ctx, "fanout_modules", lambda *a, **k: [wcand])
+    monkeypatch.setattr(ctx, "reduce_residuals", lambda *a, **k: {
+        "merged_diff": "d", "residual_failing_ids": ["t4", "t5"], "accepted": False,
+        "gold_passed": 3, "conflicts": ["m1", "m2"]})
+    monkeypatch.setattr(ctx, "repair_residual", lambda *a, **k: wcand)
+    monkeypatch.setattr(ctx, "coupled_plateau", lambda red, cands: True)     # force the switch
+    monkeypatch.setattr(ctx, "should_continue_waves", lambda: True)
+    monkeypatch.setattr(ctx, "carry_best", lambda: "BEST_TREE")
+    monkeypatch.setattr(ctx, "integrator_brief", lambda m, ids: "BRIEF")
+
+    def _spy_ralph(*, id_base=0, seed_carry=None, brief=None):
+        spy["ralph"] += 1
+        spy["seed"] = seed_carry
+        spy["brief"] = brief
+        return wcand
+    monkeypatch.setattr(ctx, "ralph_loop", _spy_ralph)
+    res = ctx.run_phase({"modules": ["mod_a"], "acceptance_gold_ids": ["t1", "t2", "t3", "t4", "t5"],
+                         "name": "p0"}, phase_index=0)
+    assert spy["ralph"] == 1                             # integrator invoked from the phased path
+    assert spy["seed"] == "BEST_TREE" and spy["brief"] == "BRIEF"
+    assert res["candidate"] is wcand
+    assert res["phase_pass_count"] == 3 and res["phase_total"] == 5   # t1,t2,t3 green; t4,t5 residual
+    assert res["phase_passed"] is False
+
+
 def test_reset_patience_rebases_clocks_not_frontier():
     repo = _two_module_repo()
     eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
