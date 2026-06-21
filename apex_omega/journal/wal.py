@@ -376,6 +376,16 @@ class Journal:
         with self._lock:
             return self._committed_agents
 
+    # -- committed-entry iteration (resume reconstruction) ----------------
+    def committed_entries(self, kind: Optional[str] = None) -> list[JournalEntry]:
+        """Snapshot of the committed latest-wins OK entries (optionally filtered by ``kind``),
+        ascending by seq. Used by candidate reconstruction on resume (O1/NEW-I2): the live
+        ``_index`` already holds exactly the latest committed OK record per input-hash, so this
+        is a pure read of durable state (no WAL append) — replay-deterministic."""
+        with self._lock:
+            entries = [e for e in self._index.values() if kind is None or e.kind == kind]
+        return sorted(entries, key=lambda e: e.seq)
+
     # -- diagnostics ------------------------------------------------------
     def stats(self) -> dict:
         with self._lock:

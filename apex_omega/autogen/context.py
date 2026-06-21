@@ -429,6 +429,10 @@ class OrchestrationContext:
         # closing the C1 control-flow-divergence hole. Decisions are taken on the main
         # orchestrator thread only (after the ctx.parallel barrier), so no lock is needed.
         self._wave_counter = itertools.count()
+        # O1/NEW-I2: on a RESUME, rebuild the candidate frontier from the durable kind="candidate"
+        # journal records BEFORE any new wave runs, so carry_best()/select/reduce never see a partial
+        # set that silently drops the best diff (the networkx 2220->13 loss). Fresh run => no-op.
+        self._restore_candidates_from_journal()
 
     # ---- narration / budget (read-mostly) ----
     def phase(self, title: str) -> None:
@@ -826,6 +830,105 @@ class OrchestrationContext:
     def all_candidates(self) -> list:
         return [c for c in self._all_candidates if c is not None]
 
+    # ---- O1/NEW-I2/NEW-I5: candidate banking + lossless-resume reconstruction ----
+    def _bank_candidate(self, cand: Optional[Candidate]) -> None:
+        """Durably journal a diff-bearing candidate (kind="candidate") so a resume can rebuild the
+        frontier instead of losing it (the networkx 2220->13 silent-loss). The candidate's diff is
+        stored CONTENT-ADDRESSED at bank time (NEW-I5: linked by construction — never an unlinked
+        high-score), its execution-derived ranking fields + meta go into structured_result, and the
+        record is keyed deterministically on (candidate_id, content_sha, ns) so a re-bank on resume is
+        latest-wins idempotent. kind!="agent" so it never perturbs the per-run agent ceiling; it adds
+        NO new control flow on a fresh run (carry/select read live _all_candidates as before). Empty /
+        carry-conflict candidates carry no restorable work and are skipped. Best-effort, never fatal."""
+        if cand is None:
+            return
+        diff = getattr(cand, "diff", "") or ""
+        if not diff.strip():
+            return
+        try:
+            from ..journal.key import canonical_key
+            from ..journal.wal import RESULT_OK
+            j = getattr(self._engine, "journal", None)
+            if j is None:
+                return
+            m = cand.meta or {}
+            sr = {
+                "candidate_id": cand.candidate_id,
+                "accepted": bool(cand.accepted),
+                "combined_score": float(cand.combined_score or 0.0),
+                "public_signal_score": float(cand.public_signal_score or 0.0),
+                "verification_score": float(cand.verification_score or 0.0),
+                "critic_score": float(cand.critic_score or 0.0),
+                "size": int(cand.size or 1),
+                "changed_files_len": int(cand.changed_files_len or 0),
+                "cluster_id": int(cand.cluster_id or 0),
+                "rollout_id": int(cand.rollout_id if cand.rollout_id is not None else -1),
+                "content_sha": cand.content_sha or "",
+                "meta": m,
+            }
+            ih = canonical_key({"kind": "candidate", "scoped_inputs": {
+                "candidate_id": cand.candidate_id, "content_sha": cand.content_sha or "",
+                "ns": self._node_ns}})
+            j.commit(
+                input_hash=ih, kind="candidate", prompt_canonical="", model_id="",
+                vendor="", cli_version="", scoped_inputs_hash="", result_status=RESULT_OK,
+                structured_result=sr, fs_diff_text=diff, node_id="candidate",
+                gold_passed=(True if int(m.get("gold_passed", 0) or 0) > 0 else None),
+                pass_rate=float(cand.public_signal_score or 0.0),
+                indeterminate=(True if m.get("indeterminate") else None),
+                content_sha=cand.content_sha or "",
+            )
+        except Exception:
+            pass
+
+    def _restore_candidates_from_journal(self) -> None:
+        """O1/NEW-I2: rebuild ``_all_candidates`` from the durable kind="candidate" records on a
+        resume so carry_best()/select/reduce see the FULL prior frontier (not a partial set that
+        silently drops the best diff). Fresh run (no such records) => no-op => byte-identical to the
+        pre-fix behavior. Deduped by candidate_id (a re-run attempt re-appends the live candidate;
+        the restored copy must not double it). Diff blobs are loaded eagerly here (bounded by the
+        candidate count) so a restored candidate is immediately carry/select-usable. Best-effort."""
+        j = getattr(self._engine, "journal", None)
+        if j is None or not hasattr(j, "committed_entries"):
+            return
+        try:
+            entries = j.committed_entries(kind="candidate")
+        except Exception:
+            return
+        seen = {c.candidate_id for c in self._all_candidates if c is not None}
+        restored = 0
+        for entry in entries:
+            try:
+                sr = entry.structured_result or {}
+                cid = sr.get("candidate_id") or ""
+                if not cid or cid in seen:
+                    continue
+                diff = j.load_diff(entry.fs_diff_ref) if entry.fs_diff_ref else ""
+                if not (diff or "").strip():
+                    continue   # an unloadable/empty blob carries no restorable work
+                cand = Candidate(
+                    candidate_id=cid,
+                    accepted=bool(sr.get("accepted", False)),
+                    combined_score=float(sr.get("combined_score", 0.0) or 0.0),
+                    public_signal_score=float(sr.get("public_signal_score", 0.0) or 0.0),
+                    verification_score=float(sr.get("verification_score", 0.0) or 0.0),
+                    critic_score=float(sr.get("critic_score", 0.0) or 0.0),
+                    size=int(sr.get("size", 1) or 1),
+                    changed_files_len=int(sr.get("changed_files_len", 0) or 0),
+                    cluster_id=int(sr.get("cluster_id", 0) or 0),
+                    content_sha=sr.get("content_sha", "") or "",
+                    diff=diff,
+                    rollout_id=int(sr.get("rollout_id", -1) if sr.get("rollout_id") is not None else -1),
+                    meta=dict(sr.get("meta") or {}),
+                )
+                self._all_candidates.append(cand)
+                seen.add(cid)
+                restored += 1
+            except Exception:
+                continue
+        if restored:
+            self.log(f"resume: restored {restored} banked candidate(s) from journal")
+
     @property
     def best_pass_rate(self) -> float:
         return self._best_pass_rate
@@ -1071,6 +1174,8 @@ class OrchestrationContext:
                 cand.meta["integrity"] = integ
                 self._record_integrity(f"{prefix}{aid}", spec.vendor, integ)
             self._all_candidates.append(cand)
+            # O1/NEW-I2/NEW-I5: durably bank the diff-bearing candidate so a resume rebuilds it.
+            self._bank_candidate(cand)
             # checkpoint=False lets the host-side floor-probe BANK (journal) the candidate
             # for resilience WITHOUT writing the cross-process "cell solved" signal, so an
             # honest "autogen stands alone" run is not reported solved via the template floor.
@@ -1960,6 +2065,7 @@ class OrchestrationContext:
                 candidate_id=f"{self._node_ns}reduce{merge_id}", diff=merged_diff, vr=vr,
                 rollout_id=merge_id, cluster_id=merge_id, meta=meta)
             self._all_candidates.append(cand)
+            self._bank_candidate(cand)   # O1/NEW-I2: a merged coherent tree is restorable too
             # Feed the merged full-suite measurement into the SPFG+ frontier so a climbing frontier
             # (more residual ids green across loop-until-dry rounds) RESETS the patience arms, and a
             # conflict/indeterminate reduce is neutral. No new stop logic — the existing governor
