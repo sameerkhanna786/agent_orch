@@ -142,6 +142,17 @@ def orchestrate(ctx):
         if red["accepted"]:
             ctx.log("SOLVED in loop-until-dry round " + str(rnd))
             return red["candidate"]
+        # (3b) COUPLED-REPO ROUTER (merge-reduce v2): when the textual merge keeps SHEDDING on a
+        # coupled plateau (overlapping modules reject ~50 hunks each, frontier flat >0 — the babel
+        # 937 trap the gold==0 collapse fallback never catches), abandon the lossy per-module merge
+        # loop for a COHERENT INTEGRATOR lineage seeded by the best coherent tree (carry_best), which
+        # reconciles the overlapping modules in ONE tree (ralph-on-the-carry, carry-LAST, governed).
+        if ctx.coupled_plateau(red, cands):
+            ctx.log("coupled plateau (overlapping modules shedding hunks) -> coherent integrator")
+            w = ctx.ralph_loop(id_base=812000, seed_carry=ctx.carry_best(),
+                               brief=ctx.integrator_brief(modules, residual))
+            if w is not None:
+                return w
         if red["merged_diff"]:
             carry = red["merged_diff"]
         residual = red["residual_failing_ids"]
@@ -290,6 +301,11 @@ def orchestrate(ctx):
         red = ctx.reduce_residuals([c], carry_diff=carry)
         if red["accepted"]:
             return red["candidate"]
+        if ctx.coupled_plateau(red, cands):   # coupled plateau -> coherent integrator (merge-reduce v2)
+            w = ctx.ralph_loop(id_base=812000, seed_carry=ctx.carry_best(),
+                               brief=ctx.integrator_brief(modules, residual))
+            if w is not None:
+                return w
         if red["merged_diff"]:
             carry = red["merged_diff"]
         residual = red["residual_failing_ids"]

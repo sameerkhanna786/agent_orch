@@ -1410,6 +1410,81 @@ class OrchestrationContext:
                     return True
         return False
 
+    def coupled_plateau(self, red: dict, candidates: Sequence[Optional[Candidate]]) -> bool:
+        """COUPLED-REPO detector (merge-reduce v2). True when the textual fan-out merge is SHEDDING
+        heavily on a tightly-coupled repo AND the frontier has stopped rising for a SUSTAINED window
+        — the signal to abandon the lossy decompose->textual-merge loop for a coherent INTEGRATOR
+        lineage. Grounded in the babel evidence: ~50 hunks/module rejected across 3 OVERLAPPING
+        modules, gold flat at 932/936/937 (>0, so NOT the gold==0 total-collapse the existing fallback
+        owns). Pure function of already-journaled signals + ctx streak state (replay-deterministic by
+        position). Gated by APEX_OMEGA_COHERENT_INTEGRATOR (default on, ablatable).
+
+        Corrected per the adversarial review: (1) the COUPLING signal (overlap + heavy shed) is read
+        from a MULTI-candidate fan-out reduce and LATCHED, because the single-candidate loop reduces
+        downstream don't conflict; (2) the PLATEAU is a SUSTAINED streak of non-`advanced` reduces
+        (the merge failing to beat the PRIOR frontier — not the tautological gp<=best read after the
+        merge was folded in); (3) a frontier rise resets the streak so a CLIMBING loop is never
+        switched."""
+        if os.environ.get("APEX_OMEGA_COHERENT_INTEGRATOR", "1").strip().lower() in (
+                "0", "false", "no", "off"):
+            return False
+        red = red or {}
+        if int(red.get("gold_passed", 0) or 0) <= 0:
+            return False                         # gold==0 total-collapse stays with the collapse fallback
+        live = [c for c in (candidates or []) if c is not None]
+        # LATCH the coupling verdict from a real multi-module merge (single-candidate loop reduces
+        # don't reflect inter-module overlap and must not clear it).
+        if len(live) >= 2:
+            n_conf = len(red.get("conflicts", []) or [])
+            high_conflict = (float(red.get("conflict_frac", 0.0) or 0.0) >= 0.5
+                             or int(red.get("max_rejected_hunks", 0) or 0) >= 30
+                             or n_conf >= max(2, (len(live) + 1) // 2))
+            self._coupled_fanout = bool(high_conflict and self.modules_overlap(live))
+        if not getattr(self, "_coupled_fanout", False):
+            return False
+        # SUSTAINED plateau: count consecutive reduces that did NOT beat the prior frontier.
+        if bool(red.get("advanced")):
+            self._coupled_streak = 0
+            return False
+        self._coupled_streak = getattr(self, "_coupled_streak", 0) + 1
+        return self._coupled_streak >= 2
+
+    def _reset_patience(self) -> None:
+        """Give a strategy SWITCH (coupled fan-out -> coherent integrator) a FAIR patience window:
+        rebase the SPFG++ plateau/streak clocks to NOW so the integrator's first productive round is
+        not pre-empted by the fan-out's already-spent clock. Does NOT touch _best_gold_passed — the
+        integrator must still BEAT the banked frontier to count as progress; only the
+        since-improvement baselines move."""
+        self._agents_at_best = self._engine.agents_used()
+        self._tokens_at_best = self._engine.budget.spent()
+        self._valid_measurements_at_best = self._valid_measurements
+        self._valid_wall_at_best = self._valid_wall_accum if self._wall_started else None
+        self._dry_rounds = 0
+        self._sterile_streak = 0
+        self._nonresult_streak = 0
+        self._indeterminate_streak = 0
+
+    def integrator_brief(self, modules: Sequence[dict], residual_ids: Sequence[str]) -> str:
+        """The coherent-INTEGRATOR brief for the coupled-repo finish: ONE agent owns the WHOLE tree
+        (the best coherent fan-out result is pre-applied) and reconciles the modules' OVERLAPPING
+        shared-file edits — which a mechanical merge sheds — into one implementation, targeting the
+        still-failing gold ids. Static for the lineage (replay-safe). Reuses the eval's residual brief
+        prefix via _prompt_builder so the gold inventory / framing firewall stay intact."""
+        ids = [str(i) for i in (residual_ids or [])]
+        names = sorted({str((m or {}).get("module")) for m in (modules or []) if (m or {}).get("module")})
+        base = self._prompt_builder(self, 712000, "integrate")
+        return (
+            base
+            + "\n\n--- COHERENT INTEGRATION (whole-tree) ---\n"
+            + "Parallel module agents each implemented part of this repo, but they EDIT OVERLAPPING "
+            + "shared files so a mechanical merge loses work. The strongest combined implementation is "
+            + "ALREADY in this workspace — keep what works and RECONCILE the modules into ONE coherent "
+            + "implementation, editing across module boundaries as needed.\n"
+            + (("Modules to integrate: " + ", ".join(names[:40]) + "\n") if names else "")
+            + (("These gold tests still FAIL; make them pass without breaking the rest:\n"
+               + "\n".join(ids[:40]) + "\n") if ids else "")
+            + "Do NOT edit tests. Run the full test command and iterate until the suite is green.\n")
+
     def decompose(self, *, vendor: Optional[str] = None, model: Optional[str] = None,
                   agent_id: int = 700100) -> Optional[dict]:
         """Read-only, schema-validated repo DECOMPOSITION (the convergence default's wave 0).
@@ -1824,6 +1899,9 @@ class OrchestrationContext:
             # (below) reverts any partial graft that lowers the score — a graft can never fake a pass.
             partial = os.environ.get("APEX_OMEGA_MERGE_PARTIAL", "1").strip().lower() not in (
                 "0", "false", "no", "off")
+            max_rejected = 0          # coupled-repo signal (v2): MAX per-module rejected hunks
+            n_partial = 0             # modules that landed only partially (genuine shared-file overlap)
+            n_cands = len(cands)
             for c in cands:
                 m = getattr(c, "meta", {}) or {}
                 name = str(m.get("module") or c.candidate_id)
@@ -1838,6 +1916,8 @@ class OrchestrationContext:
                     if r.get("clean"):
                         continue
                     conflicts.append(name)        # rejected residue -> loop-until-dry re-solves it
+                    n_partial += 1
+                    max_rejected = max(max_rejected, int(r.get("rejected_hunks", 0) or 0))
                     self.log(f"reduce_residuals: module {name} partially merged "
                              f"({r.get('rejected_hunks', 0)} hunk(s) rejected, the rest landed)")
                 elif not apply_diff(wt, d):
@@ -1901,7 +1981,14 @@ class OrchestrationContext:
                       # loop-until-dry) from a TOTAL collapse (route to SELECT/best-of-N), so a
                       # majority-conflict merge that still made progress is not thrown to best-of-N.
                       "gold_passed": int(out_gp), "floored": floored,
-                      "conflicts": list(conflicts), "indeterminate": bool(indeterminate or vr.indeterminate)}
+                      "conflicts": list(conflicts), "indeterminate": bool(indeterminate or vr.indeterminate),
+                      # merge-reduce v2 coupled-repo telemetry (pure-Python, zero-LLM, replay-safe):
+                      # how badly the textual merge SHED work this round (the coupled-plateau signal).
+                      # `advanced` = the merge BEAT the prior frontier (vs the tautological gp<=best
+                      # read AFTER _observe folded the merge in) — the correct non-flat signal.
+                      "max_rejected_hunks": int(max_rejected), "n_partial_merged": int(n_partial),
+                      "conflict_frac": (len(conflicts) / max(1, n_cands)),
+                      "advanced": bool(merge_gp > prior_frontier)}
             if scope_ids is not None:
                 # PURE SET TEST over the EFFECTIVE residual (the merge's, or the floored best tree's): a
                 # phase passes iff ALL its acceptance gold ids are absent from the failing set AND the
@@ -1987,7 +2074,8 @@ class OrchestrationContext:
         )
 
     # ---- RALPH-WIGGUM baseline: naive persistence, the IDENTICAL prompt every iteration ----
-    def ralph_loop(self, *, id_base: int = 800000) -> Optional[Candidate]:
+    def ralph_loop(self, *, id_base: int = 800000, seed_carry: Optional[str] = None,
+                   brief: Optional[str] = None) -> Optional[Candidate]:
         """The ralph-wiggum baseline: ONE sequential lineage that re-runs the BYTE-IDENTICAL solve
         prompt every iteration in a PERSISTENT workspace — faithful naive iterate-until-done. The
         loop injects NOTHING between turns: NO failing-test ids, NO failure excerpts, NO diff-paste
@@ -2002,16 +2090,29 @@ class OrchestrationContext:
         always builds on the last state, never a cherry-picked best).
 
         Distinct from ``baseline`` (K independent THROWAWAY rollouts, no persistence) and from omega
-        (scout/author/decompose/parallel waves)."""
+        (scout/author/decompose/parallel waves).
+
+        DUAL USE (merge-reduce v2): with ``seed_carry`` + ``brief`` this same proven mechanic
+        (carry-the-LAST-tree, traverse dips, select-best, governed) becomes the COHERENT INTEGRATOR
+        the converge default switches to on a coupled plateau — seeded from the best fan-out tree
+        (``carry_best()``) with a residual-targeting brief, reconciling overlapping module edits in
+        ONE coherent lineage instead of a lossy textual merge. Defaults (None/None) = the pure ralph
+        baseline arm, byte-for-byte unchanged."""
         # Build the prompt ONCE so every iteration re-runs the byte-identical text (ralph fidelity:
-        # the prompt never varies by attempt index, strategy, or accumulated feedback).
+        # the prompt never varies by attempt index, strategy, or accumulated feedback). The integrator
+        # passes a residual-targeting brief instead (feedback is correct there — it is NOT the baseline).
         ralph_strategy = self.strategies[0] if getattr(self, "strategies", None) else "minimal"
-        fixed_prompt = self._prompt_builder(self, id_base, ralph_strategy)
+        fixed_prompt = brief if brief else self._prompt_builder(self, id_base, ralph_strategy)
         # One agent type for the whole lineage (a single naive worker), pinned so the loop does not
         # rotate vendors by attempt index.
         ralph_vendor = self._worker_specs[0].vendor if self._worker_specs else None
         lineage: list = []
-        carry = ""                       # the PERSISTENT WORKSPACE (accumulated edits) re-applied each turn
+        # PERSISTENT WORKSPACE seed: "" for the pure baseline; the best coherent fan-out tree for the
+        # integrator. A switch (seed given) rebases the patience clock so the integrator gets a fair
+        # window after the fan-out already spent agents (it must still BEAT the banked frontier).
+        carry = seed_carry or ""
+        if seed_carry is not None:
+            self._reset_patience()
         k = 0
         while True:
             aid = id_base + k

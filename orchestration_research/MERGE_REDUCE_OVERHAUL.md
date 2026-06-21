@@ -69,3 +69,44 @@ No merge step may set `accepted`/self-certify; no LLM inside `reduce_residuals` 
 `repair_residual`); no `git apply --union`/CRDT/OT auto-resolve (manufactures compiles-but-fails trees
 that fake progress); never trust an LLM merger's "resolved successfully"; keep the cheap clean-apply
 fast path.
+
+---
+
+# v2 — coupling-triggered coherent integrator (close the converge≪ralph gap)
+
+**Live evidence the v1 flaw persisted:** converge/babel ran 57 agents and PLATEAUED at 937/5663
+(932/936/937), the #2 floor never firing (pure plateau, not collapse). Each reduce sheds ~50 hunks
+PER MODULE (`babel.messages.extract/.frontend/.support` each "50 hunk(s) rejected, the rest landed")
+— the modules write GENUINELY OVERLAPPING versions of shared files, so even hunk-level partial-apply
+loses the bulk. Faithful ralph (one coherent lineage) climbs higher because it never sheds at a merge.
+The existing collapse fallback only fires at gold==0, so babel's 937>0 stayed trapped in the lossy
+merge loop.
+
+**Workflow `wf_c6a9e650-71a` (9 agents, web-grounded + adversarial) verdict:** for a HIGHLY-coupled
+repo the optimal move is NOT a better merge algorithm but a ROUTER — detect coupling + plateau and
+SWITCH from decompose→textual-merge to a single COHERENT INTEGRATOR lineage seeded from the best
+coherent candidate (research convergent: Google scaling −39..−70% on sequential/coupled tasks under
+multi-agent; Kimi swarm picks a single agent for coupled stateful code; Anthropic orchestrator-workers
+fits only when subtasks are independent).
+
+**Implemented (default ON, ablate APEX_OMEGA_COHERENT_INTEGRATOR=0):**
+- `reduce_residuals` now surfaces coupled-repo telemetry (zero-LLM, replay-safe): `max_rejected_hunks`
+  (MAX per-module), `n_partial_merged`, `conflict_frac`, and `advanced` (did the merge BEAT the prior
+  frontier — the correct non-tautological plateau signal).
+- `coupled_plateau(red, cands)` — LATCHES the coupling verdict from a multi-module fan-out reduce
+  (overlap via `modules_overlap` + heavy shed) and fires only after a SUSTAINED streak (≥2) of
+  non-`advanced` reduces; gold==0 stays with the collapse fallback; flag-gated.
+- The converge default + CONVERGE_EXEMPLAR loop-until-dry route a detected coupled plateau into
+  `ralph_loop(seed_carry=carry_best(), brief=integrator_brief(...))` — the proven ralph mechanic
+  (carry the LAST tree → traverse dips → select best, governed) becomes a coherent integrator seeded
+  by the best fan-out tree, reconciling overlapping modules in ONE lineage.
+- `_reset_patience()` rebases the SPFG++ clocks at the switch (fair window for the integrator; the
+  frontier `_best_gold_passed` is untouched — it must still be BEATEN).
+
+**Adversarial corrections folded in:** (1) check INSIDE the loop on a SUSTAINED streak, not once
+before it; (2) carry the LAST integrator tree (ralph-style, traverse dips) via `ralph_loop`, not
+`carry_best()` each round; (3) reset the integrator's patience clock; (4) per-module (max) rejected
+threshold, not total-across-modules. Cardinal Contract preserved (integrator only PROPOSES; only
+`ctx.select` on the full gold suite ACCEPTS); journal-replay-safe (all LLM stays in the journaled
+ralph_loop/repair_residual seams; `reduce_residuals` stays zero-LLM). Tests: reduce telemetry +
+coupled_plateau streak/gates/disjoint/flag-off + patience-rebase.

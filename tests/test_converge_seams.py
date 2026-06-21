@@ -397,6 +397,85 @@ def test_reduce_floor_reverts_regressing_merge_to_best_coherent():
     assert red["residual_failing_ids"] == ["t6", "t7", "t8", "t9", "t10"]
 
 
+# --------------------------------------------------------------------------- merge-reduce v2 (coupled)
+def _overlap_cands():
+    from apex_omega.kernel.verify import candidate_from_verification
+    da = "--- a/shared.py\n+++ b/shared.py\n@@ -1 +1 @@\n-x = 0\n+x = 1\n"
+    db = "--- a/shared.py\n+++ b/shared.py\n@@ -1 +1 @@\n-x = 0\n+x = 2\n"
+    ca = candidate_from_verification(candidate_id="a", diff=da, vr=VerificationResult(passed=1), meta={"module": "a", "gold_passed": 1})
+    cb = candidate_from_verification(candidate_id="b", diff=db, vr=VerificationResult(passed=1), meta={"module": "b", "gold_passed": 1})
+    return ca, cb
+
+
+def test_reduce_surfaces_coupling_telemetry():
+    repo = _two_module_repo()
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
+    ctx = _ctx(eng, repo, _real_pytest_score(["test_a.py::test_a", "test_b.py::test_b"]))
+    from apex_omega.kernel.verify import candidate_from_verification
+    diff_a = ("--- a/mod_a.py\n+++ b/mod_a.py\n@@ -1,2 +1,2 @@\n"
+              "-def a():\n-    return 0  # BUG\n+def a():\n+    return 1\n")
+    ca = candidate_from_verification(candidate_id="ma", diff=diff_a,
+                                     vr=VerificationResult(passed=1, total=2, pass_rate=0.5), meta={"module": "mod_a"})
+    red = ctx.reduce_residuals([ca])
+    # v2 telemetry keys are present + typed (clean disjoint apply -> no shedding)
+    assert red["max_rejected_hunks"] == 0 and red["n_partial_merged"] == 0
+    assert red["conflict_frac"] == 0.0
+    assert isinstance(red["advanced"], bool)
+
+
+def test_coupled_plateau_streak_and_gates(monkeypatch):
+    repo = _two_module_repo()
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
+    ctx = _ctx(eng, repo, lambda wt: VerificationResult())
+    ca, cb = _overlap_cands()                       # two OVERLAPPING modules (same shared.py)
+    ctx._best_gold_passed = 937
+    hi = {"gold_passed": 937, "conflict_frac": 1.0, "max_rejected_hunks": 50, "conflicts": ["a", "b"]}
+    # gold==0 total-collapse is owned by the collapse fallback, never the integrator
+    assert ctx.coupled_plateau({**hi, "gold_passed": 0, "advanced": False}, [ca, cb]) is False
+    # a multi-cand high-conflict reduce that ADVANCED latches coupling but does NOT switch (climbing)
+    assert ctx.coupled_plateau({**hi, "advanced": True}, [ca, cb]) is False
+    # then a SUSTAINED non-advancing plateau (single-cand loop reduces) -> streak builds -> switch at 2
+    flat = {"gold_passed": 937, "conflict_frac": 0.0, "max_rejected_hunks": 0, "conflicts": [], "advanced": False}
+    assert ctx.coupled_plateau(flat, [ca]) is False   # streak 1
+    assert ctx.coupled_plateau(flat, [ca]) is True     # streak 2 -> SWITCH
+    # a frontier rise mid-streak resets it (a climbing loop is never switched)
+    assert ctx.coupled_plateau({**flat, "advanced": True}, [ca]) is False
+    assert ctx.coupled_plateau(flat, [ca]) is False     # streak back to 1
+
+
+def test_coupled_plateau_disjoint_and_flag_off(monkeypatch):
+    from apex_omega.kernel.verify import candidate_from_verification
+    repo = _two_module_repo()
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
+    ctx = _ctx(eng, repo, lambda wt: VerificationResult())
+    ctx._best_gold_passed = 5
+    # DISJOINT clean modules (different files) -> never coupled even if it plateaus
+    da = candidate_from_verification(candidate_id="a", diff="--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a=0\n+a=1\n", vr=VerificationResult(passed=1), meta={"module": "a"})
+    db = candidate_from_verification(candidate_id="b", diff="--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n-b=0\n+b=1\n", vr=VerificationResult(passed=1), meta={"module": "b"})
+    clean = {"gold_passed": 5, "conflict_frac": 0.0, "max_rejected_hunks": 0, "conflicts": [], "advanced": False}
+    assert ctx.coupled_plateau(clean, [da, db]) is False
+    assert ctx.coupled_plateau(clean, [da, db]) is False   # never latches (disjoint)
+    # flag OFF -> always False even on the coupled shape
+    monkeypatch.setenv("APEX_OMEGA_COHERENT_INTEGRATOR", "0")
+    ca, cb = _overlap_cands()
+    assert ctx.coupled_plateau({"gold_passed": 937, "conflict_frac": 1.0, "max_rejected_hunks": 50,
+                                "conflicts": ["a", "b"], "advanced": False}, [ca, cb]) is False
+
+
+def test_reset_patience_rebases_clocks_not_frontier():
+    repo = _two_module_repo()
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
+    ctx = _ctx(eng, repo, lambda wt: VerificationResult())
+    ctx._best_gold_passed = 900
+    ctx._valid_measurements = 20
+    ctx._valid_measurements_at_best = 5      # a stale (large) plateau gap
+    ctx._sterile_streak = 9
+    ctx._reset_patience()
+    assert ctx._valid_measurements_at_best == 20      # rebased to NOW (no plateau)
+    assert ctx._sterile_streak == 0
+    assert ctx._best_gold_passed == 900               # frontier UNTOUCHED (must still be beaten)
+
+
 # --------------------------------------------------------------------------- carry_best
 def test_carry_best_picks_highest_gold_partial():
     repo = _two_module_repo()
