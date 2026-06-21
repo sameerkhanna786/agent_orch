@@ -50,3 +50,11 @@ Branch `feat/phase-planner-hybrid`. Run started 2026-06-20.
 - Do NOT mid-cell kill/restart the run (causes O1 corruption). All fixes are landed + stable now.
 - Monitor: `/tmp/omega_monitor.py` (delta-based: prep-crash / carry-conflict / infra-spike / load /
   disk / runner-death / catastrophic-collapse / per-cell completion).
+
+## RUN STOPPED 2026-06-21 at 20/105 (15 scored + 5 v1-ref) — enough signal for next-phase dev
+Archived (lightweight): runs/comprehensive_v2/ (progress + per-cell reports/checkpoints/narration/wal).
+VERDICT (seed-0): hybrid-nogate (phase planner, gate OFF) is the strongest arm — SOLVED babel
+(5663/5663, 26 agents) + near-solved mimesis (6156/6159); beats flat converge (babel 937, mimesis
+3557) and ralph (babel 5648 near but mimesis 0). Goal gate net-negative (O2). pydantic fundamental
+(O3). converge/networkx=13 is the O1 resume-corruption artifact (real ~2220). Open items O1-O5 are the
+next-phase work (esp. O1 diff-banking/resume robustness + O2 drop-gate before a clean n=3).
