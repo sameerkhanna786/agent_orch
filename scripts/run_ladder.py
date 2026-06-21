@@ -196,6 +196,20 @@ ARMS = [
                       {"APEX_OMEGA_ORCHESTRATION": "hybrid", "APEX_OMEGA_PHASE_PLANNER": "1",
                        "APEX_OMEGA_GOAL_GATE": "0",
                        "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    # ===== DIAGNOSIS REDESIGN A/B (O2/O3/O4; the user's "review at every planning stage + diagnose
+    # the real cause" directive). hybrid-diag = hybrid-nogate (the OLD BEST: gate OFF) PLUS the new
+    # gated redesign: ctx.diagnose() (AST collection pre-pass + fact-checked scouts), ctx.review_plan()
+    # (advisory bounded plan review at every seam, grounded in the diagnosis), and the synthetic
+    # make-it-collect Phase 0. The ONLY variable vs hybrid-nogate is the three redesign gates, so this
+    # is the clean 2-arm test. Suggested run (no mid-cell kills):
+    #   LADDER_ARMS=hybrid-nogate,hybrid-diag LADDER_REPOS=babel,mimesis,pydantic,networkx \
+    #   LADDER_SEEDS=3 python scripts/run_ladder.py
+    ("hybrid-diag",   ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                       "--autogen-max-agents", _OMEGA_MAX],
+                      {"APEX_OMEGA_ORCHESTRATION": "hybrid", "APEX_OMEGA_PHASE_PLANNER": "1",
+                       "APEX_OMEGA_GOAL_GATE": "0",
+                       "APEX_OMEGA_DIAG": "1", "APEX_OMEGA_PLAN_REVIEW": "1", "APEX_OMEGA_PHASE0": "1",
+                       "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
     ("hybrid-codegen", ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
                         "--autogen-max-agents", _OMEGA_MAX],
                        {"APEX_OMEGA_ORCHESTRATION": "hybrid", "APEX_OMEGA_PHASE_PLANNER": "1",

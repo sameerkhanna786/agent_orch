@@ -51,6 +51,27 @@ Branch `feat/phase-planner-hybrid`. Run started 2026-06-20.
 - Monitor: `/tmp/omega_monitor.py` (delta-based: prep-crash / carry-conflict / infra-spike / load /
   disk / runner-death / catastrophic-collapse / per-cell completion).
 
+## ALL OPEN ITEMS ADDRESSED 2026-06-21 (branch feat/phase-planner-hybrid; suite 445 green)
+Implementation of every O1-O5 + NEW-I1..I10 + F1/O4 item from the comprehensive fix workflow +
+the O2/O3/O4 redesign is committed + pushed:
+- O1/NEW-I2/NEW-I5 (9880b90): durable candidate banking (kind="candidate", content-addressed diff)
+  + _restore_candidates_from_journal on resume -> carry_best/select/reduce see the full frontier
+  (the 2220->13 loss). +Journal.committed_entries. test_candidate_resume.
+- NEW-I1/I4/I8/I9 (8f6542d): worktree resume-hardening (dead-pid lock reclaim, hard stale-worktree
+  reclaim/fail-loud) + apply conflict-marker guard (apply_diff/apply_diff_partial). test_worktree_resume.
+- NEW-I6 (e6eed52): bank best-partial before a governor cut (synchronize cut with banking).
+- O4 + F1 + O1-journal-banking (c00c1ef): --memray-class addopts strip when plugin absent;
+  pydantic-core==2.46.1 pin + loud preflight; Journal.ensure_diff_linked + commit-stores-blob-first.
+- O2/O3/O4 REDESIGN (3929acd): ctx.diagnose() (zero-token AST collection pre-pass + fact-checked
+  scouts), ctx.review_plan() (advisory, bounded, diagnosis-grounded plan review at every seam, never
+  abort), synthetic Phase 0 (make-it-collect). Gated APEX_OMEGA_DIAG/PLAN_REVIEW/PHASE0; ALL OFF ==
+  hybrid-nogate byte-identical. test_diagnose_ast + test_diagnose_redesign.
+- O5 (score-cache key on code/write-tree identity): DEFERRED — resume-efficiency only; the planned
+  clean run has no mid-cell kills so cross-format cache staleness does not occur. O1 makes resume CORRECT.
+- O2 (drop goal gate): the "old best" arm runs APEX_OMEGA_GOAL_GATE=0 (hybrid-nogate); the new arm
+  runs the redesign gates on.
+NEXT: 2-arm clean eval — hybrid-diag (DIAG+PLAN_REVIEW+PHASE0 on, gate off) vs hybrid-nogate (all off).
+
 ## RUN STOPPED 2026-06-21 at 20/105 (15 scored + 5 v1-ref) — enough signal for next-phase dev
 Archived (lightweight): runs/comprehensive_v2/ (progress + per-cell reports/checkpoints/narration/wal).
 VERDICT (seed-0): hybrid-nogate (phase planner, gate OFF) is the strongest arm — SOLVED babel
