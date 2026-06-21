@@ -814,6 +814,20 @@ class OrchestrationContext:
             self._halted = True
             self._halt_reason = reason or "plateau:no-progress"
             self._halt_is_cut = self._halt_reason.startswith("cut:")
+            # NEW-I6: synchronize banking with the cut. Bank the best-so-far PARTIAL to disk the
+            # instant before the governor halt takes effect, so a cut never discards a frontier that
+            # a later resume could carry. _checkpoint_phase is MONOTONE (only a strict gold-pass-count
+            # rise overwrites), so this is a no-op when the live frontier was already checkpointed.
+            try:
+                bestp = self._best_coherent_candidate()
+                if bestp is not None:
+                    self._checkpoint_phase(
+                        bestp,
+                        subset_passed=int((bestp.meta or {}).get("gold_passed", 0) or 0),
+                        subset_total=int((bestp.meta or {}).get("gold_total", 0) or 0),
+                        phase_id="pre_cut")
+            except Exception:
+                pass
         return cont
 
     def should_continue_waves(self) -> bool:

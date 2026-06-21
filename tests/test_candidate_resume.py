@@ -143,6 +143,25 @@ def test_select_still_abstains_on_restored_partial():
     assert ctx2.carry_best() == _HIGH_DIFF                    # ...but it IS carry-forward usable
 
 
+def test_governor_cut_banks_best_partial():
+    """NEW-I6: a governor CUT must bank the best-so-far partial to phase_checkpoint.json BEFORE the
+    halt takes effect, so the cut never discards a frontier a resume could carry."""
+    import json
+    repo = _repo()
+    run_dir = tempfile.mkdtemp()
+    eng = Engine(run_dir, run_id="t", max_total_agents=64)
+    ctx = _ctx(eng, repo)
+    ctx._all_candidates.append(_high_candidate(cid="part", gold=1500))
+    # force a cut verdict deterministically
+    ctx.governor.verdict = lambda state: (False, "cut:no-progress")
+    cont = ctx._wave_verdict(ctx._wave_state())
+    assert cont is False and ctx._halted is True and ctx._halt_is_cut is True
+    p = Path(run_dir) / "phase_checkpoint.json"
+    assert p.exists(), "best-partial was not banked before the cut"
+    rec = json.loads(p.read_text())
+    assert rec["accepted"] is False and int(rec["gold_passed"]) == 1500
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
