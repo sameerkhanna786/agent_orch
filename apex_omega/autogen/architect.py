@@ -213,6 +213,16 @@ def build_repo_map(source_repo: str, *, base_commit: Optional[str] = None,
     }
     if extra:
         repo_map.update(extra)
+    # diagnose STAGE 1 (O2/O3/O4): zero-token AST collection pre-pass. GATED — added to the repo map
+    # (hence the author prompt + ctx.diagnose) ONLY when APEX_OMEGA_DIAG is on, so the default is
+    # byte-identical to the pre-redesign baseline (hybrid-nogate). Never fatal.
+    if os.environ.get("APEX_OMEGA_DIAG", "0").strip().lower() not in ("0", "false", "no", "off"):
+        try:
+            from .diagnose_ast import analyze_collection
+            eids = repo_map.get("expected_test_ids") or repo_map.get("expected_ids") or []
+            repo_map["diagnosis"] = analyze_collection(str(root), expected_test_ids=list(eids))
+        except Exception:
+            pass
     return repo_map
 
 
@@ -506,6 +516,58 @@ def _run_phase_codegen(engine: Engine, ctx, repo_map: dict, phase: dict, carry: 
         return None
 
 
+def _reorder_plan_modules(plan: dict, first: Sequence[str]) -> dict:
+    """ADVISORY re-order (review_plan revise): float the modules named in ``first`` to the head of the
+    decomposition, preserving the relative order of the rest. No-op if none match. Pure data shuffle —
+    it never adds/removes modules (the plan's module set + gold ids are unchanged)."""
+    mods = list((plan or {}).get("modules") or [])
+    fset = set(str(x) for x in (first or []))
+
+    def _is_first(m) -> bool:
+        name = str((m or {}).get("module") or m)
+        return name in fset or name.split(".", 1)[0] in fset
+
+    head = [m for m in mods if _is_first(m)]
+    if not head:
+        return plan
+    tail = [m for m in mods if not _is_first(m)]
+    np = dict(plan)
+    np["modules"] = head + tail
+    if "order" in np:
+        np["order"] = [str((m or {}).get("module") or m) for m in (head + tail)]
+    return np
+
+
+def _synthesize_phase0(diag: dict, plan: dict) -> Optional[dict]:
+    """Build the synthetic make-it-COLLECT Phase 0 from the diagnosis (O3). Its acceptance is the gold
+    ids of the collection-closure modules (the must-implement set) when derivable, else the whole gold
+    set; the objective steers agents to fix imports/collection FIRST rather than chasing individual
+    assertions. Returns None if no gold ids can be attached (run_phase needs a scope)."""
+    must = [str(m) for m in (diag or {}).get("must_implement_modules") or []]
+    mods = (plan or {}).get("modules") or []
+    mustset = set(must) | {m.split(".", 1)[0] for m in must}
+    acc: list = []
+    for m in mods:
+        name = str((m or {}).get("module") or "")
+        if (name in mustset or name.split(".", 1)[0] in mustset
+                or any(name and (name in mm or mm in name) for mm in must)):
+            acc.extend(str(i) for i in ((m or {}).get("gold_test_ids") or []))
+    if not acc:                                  # fall back to the whole gold set
+        for m in mods:
+            acc.extend(str(i) for i in ((m or {}).get("gold_test_ids") or []))
+    acc = list(dict.fromkeys(acc))[:80]
+    if not acc:
+        return None
+    fix = str((diag or {}).get("suggested_first_fix") or "")
+    obj = ("Make the gold test suite IMPORT and COLLECT cleanly. Implement the modules whose missing "
+           "imports/symbols block collection: " + ", ".join(must[:8]) + ". "
+           + ("First fix: " + fix + " " if fix else "")
+           + "Do NOT chase individual assertions yet — the goal of this phase is a clean collection so "
+           "the rest of the suite can run.").strip()
+    return {"name": "phase0-collect", "objective": obj, "acceptance_gold_ids": acc,
+            "is_phase0": True, "must_implement": must, "needs_custom_orchestration": False}
+
+
 def phase_planned_solve(engine: Engine, ctx, repo_map: dict):
     """Claude-Code-style PHASED solve (the HYBRID core). Plan ordered phases (objectives + per-phase
     acceptance ids), solve each with the PROVEN converge inner loop scoped to its gold subset
@@ -522,11 +584,32 @@ def phase_planned_solve(engine: Engine, ctx, repo_map: dict):
     modules = (plan or {}).get("modules") or []
     if not plan or len(modules) <= 1:
         return None                                       # undecomposable -> whole-repo converge
+    # O2/O3/O4 redesign: diagnose the FIRST real blocker (import/collection/env) BEFORE planning, then
+    # ADVISORY-review the decomposition grounded in that diagnosis (not the failing tests alone). Both
+    # are no-ops when their gates are off, so the default path stays byte-identical to hybrid-nogate.
+    diag = ctx.diagnose()
+    rv = ctx.review_plan(plan, seam="decompose", diagnosis=diag, residual_ids=ctx.last_residual())
+    if rv.get("verdict") == "revise" and rv.get("first_modules"):
+        plan = _reorder_plan_modules(plan, rv["first_modules"])
+        modules = plan.get("modules") or modules
+        engine.log("review_plan: re-ordered decomposition to do " + str(rv["first_modules"][:6]) + " first")
     max_phases = {"medium": 3, "hard": 4}.get(difficulty, 3)
     n_gate = {"medium": 1, "hard": 3}.get(difficulty, 1)
     phases = ctx.plan_phases(plan=plan, max_phases=max_phases)
     if not phases or len(phases) <= 1:
         return None                                       # degenerate plan -> whole-repo converge
+    ctx.review_plan(plan, seam="phase-plan", diagnosis=diag, residual_ids=ctx.last_residual())
+    # Synthetic Phase 0 (gated APEX_OMEGA_PHASE0): when the suite cannot even COLLECT, prepend a
+    # make-it-collect phase that implements the import closure first. Partial-frontier banking + the
+    # coherent integrator (run_phase) carry the work; the exit is the normal run_phase frontier. OFF
+    # or collects-cleanly -> no prepend (baseline unchanged).
+    if (os.environ.get("APEX_OMEGA_PHASE0", "0").strip().lower() not in ("0", "false", "no", "off")
+            and diag and diag.get("collects_cleanly") is False):
+        p0 = _synthesize_phase0(diag, plan)
+        if p0 is not None and not any(p.get("name") == "phase0-collect" for p in phases):
+            phases = [p0] + list(phases)
+            engine.log("phase0: prepended make-it-collect phase targeting "
+                       + str(diag.get("must_implement_modules", [])[:6]))
     engine.log("phase plan: " + str(len(phases)) + " phases [" +
                ", ".join(str(p.get("name")) for p in phases) + "]")
     codegen = os.environ.get("APEX_OMEGA_PHASE_CODEGEN") == "1"

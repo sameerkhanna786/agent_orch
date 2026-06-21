@@ -167,6 +167,46 @@ GATE_SCHEMA = {
     },
 }
 
+# DIAGNOSIS_SCHEMA — ctx.diagnose() STAGE-2 scout reply (O2/O3/O4 redesign). A read-only scout
+# classifies the FIRST real blocker to PROGRESS (not just which tests fail): is the gold suite even
+# collecting, and if not, what import/symbol/env closure must be implemented first? It is grounded
+# in (and fact-checked against) the zero-token AST pre-pass (diagnose STAGE 1) so a scout cannot
+# hallucinate a blocker the static import graph does not support. SIGNAL only — never sets acceptance.
+DIAGNOSIS_SCHEMA = {
+    "type": "object",
+    "required": ["blocker_class"],
+    "properties": {
+        # collection_error: the suite cannot import/collect (implement the closure first).
+        # missing_dependency: an EXTERNAL package/symbol is absent (env fix, not implementation).
+        # implementation_gap: it collects; ordinary failing tests are the real work.
+        # unknown: insufficient evidence.
+        "blocker_class": {"type": "string",
+                          "enum": ["collection_error", "missing_dependency",
+                                   "implementation_gap", "unknown"]},
+        "import_chain": {"type": "array", "items": {"type": "string"}},
+        "must_implement_modules": {"type": "array", "items": {"type": "string"}},
+        "suggested_first_fix": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+# REVIEW_PLAN_SCHEMA — ctx.review_plan() per-skeptic reply. Advisory plan review at a PLANNING SEAM
+# (decompose / phase-plan / rephase / repair-plan), grounded in the diagnosis (not only the failing
+# tests). It can recommend a re-scope (revise) but NEVER aborts the run — the worst it does is hand
+# back a better-ordered / re-targeted plan. A revise MUST cite evidence grounded in the diagnosis
+# (must_implement modules / unresolved imports) or the real residual ids, else it is downgraded.
+REVIEW_PLAN_SCHEMA = {
+    "type": "object",
+    "required": ["verdict"],
+    "properties": {
+        "verdict": {"type": "string", "enum": ["proceed", "revise"]},
+        "reason": {"type": "string"},
+        "first_modules": {"type": "array", "items": {"type": "string"}},   # what to do FIRST
+        "missing_modules": {"type": "array", "items": {"type": "string"}},  # absent from the plan
+        "evidence": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
 # SANDBOX-NOT-PROMPT POLICY (user directive 2026-06-16): we do NOT limit the model via
 # prompts and we do NOT penalize/kill an attempt for trying to fetch/cheat. The CORRECTNESS
 # BOUNDARY is structural — the worktree's source SHADOWS any site-packages install (cwd for
@@ -429,6 +469,9 @@ class OrchestrationContext:
         # closing the C1 control-flow-divergence hole. Decisions are taken on the main
         # orchestrator thread only (after the ctx.parallel barrier), so no lock is needed.
         self._wave_counter = itertools.count()
+        # O2/O3/O4 redesign: diagnosis cache (computed once) + per-seam plan-review bound (iters=1).
+        self._diagnosis_cache: Optional[dict] = None
+        self._plan_review_seen: set = set()
         # O1/NEW-I2: on a RESUME, rebuild the candidate frontier from the durable kind="candidate"
         # journal records BEFORE any new wave runs, so carry_best()/select/reduce never see a partial
         # set that silently drops the best diff (the networkx 2220->13 loss). Fresh run => no-op.
@@ -1831,6 +1874,214 @@ class OrchestrationContext:
             "accepted_full": bool(red.get("accepted")),
             "candidate": red.get("candidate"), "conflicts": list(red.get("conflicts") or []),
         }
+
+    def diagnose(self, *, n: int = 2, vendor: Optional[str] = None,
+                 model: Optional[str] = None) -> dict:
+        """Determine the FIRST real blocker to progress — import / env / collection — instead of
+        treating the failing-test list as the only north star (O2/O3/O4). Two stages, fused:
+
+          STAGE 1 (zero-token, in build_repo_map): an AST import-graph pre-pass classifies the
+          collection-bootstrap imports into the unresolved-internal closure (the must-implement set),
+          unresolved-external packages, import_depth, and uninstalled-plugin addopts.
+          STAGE 2 (here): 1-N READ-ONLY scouts (ctx.signals — no plateau accounting) classify the
+          blocker_class + suggest the first fix, FACT-CHECKED against STAGE 1 (a scout's
+          must_implement entries not supported by the static import graph or the repo module list are
+          dropped — anti-hallucination, mirroring the goal-gate grounding).
+
+        Cached (computed once per cell). GATED by APEX_OMEGA_DIAG; OFF -> returns {} so every caller
+        falls back to its pre-redesign behavior (byte-identical baseline). A read-only SIGNAL: it
+        never produces a Candidate and never touches acceptance (Cardinal Contract)."""
+        if self._diagnosis_cache is not None:
+            return self._diagnosis_cache
+        if os.environ.get("APEX_OMEGA_DIAG", "0").strip().lower() in ("0", "false", "no", "off"):
+            self._diagnosis_cache = {}
+            return {}
+        import json as _json
+        from ..journal.key import sha256_hex
+        ast_diag = dict((self.repo_map or {}).get("diagnosis") or {})
+        ast_must = []
+        for u in ast_diag.get("unresolved_internal", []) or []:
+            m = u.get("module")
+            if m and m not in ast_must:
+                ast_must.append(m)
+        repo_modules = set((self.repo_map or {}).get("modules") or [])
+        # the admissible grounding set: EXACTLY the AST-derived must-implement modules + the repo's
+        # own module names. A scout must_implement entry outside this set is hallucinated and dropped
+        # (no top-package fallback: that would admit any `pkg.<anything>` once `pkg` is a real package,
+        # defeating the fact-check — the AST already names the real unresolved modules exactly).
+        admissible = set(ast_must) | repo_modules
+        collects = bool(ast_diag.get("collects_cleanly", True))
+        ext = list(ast_diag.get("unresolved_external") or [])
+        addopts_bad = list(ast_diag.get("suspect_plugin_addopts") or [])
+        ev0 = list(ast_diag.get("evidence") or [])
+        base = 700700 + int(sha256_hex("diag|" + str(self._source_repo))[:6], 16) % 80000
+        nn = max(1, int(n))
+
+        def _mk(i):
+            return lambda i=i: self.ask(
+                "You are a READ-ONLY diagnostic scout. Before any code is written, determine the "
+                "FIRST blocker that stops this repository's gold test suite from making progress — "
+                "is it even COLLECTING (importing), or is the implementation simply incomplete? Use "
+                "the static evidence below as ground truth; do NOT guess modules it does not list.\n\n"
+                + "STATIC AST PRE-PASS (authoritative facts):\n"
+                + "- collects_cleanly: " + str(collects) + "\n"
+                + "- unresolved INTERNAL imports (must implement first): " + _json.dumps(ast_must[:40]) + "\n"
+                + "- unresolved EXTERNAL packages (env/dependency): " + _json.dumps(ext[:20]) + "\n"
+                + "- uninstalled plugin addopts: " + _json.dumps([s.get("option") for s in addopts_bad]) + "\n"
+                + ("- evidence: " + "; ".join(ev0)[:600] + "\n" if ev0 else "")
+                + "\nClassify into blocker_class (collection_error | missing_dependency | "
+                "implementation_gap | unknown). For collection_error, put the repo-internal modules "
+                "that must be implemented for collection to succeed in must_implement_modules (ONLY "
+                "modules from the unresolved-internal list above), the dotted import_chain, and a "
+                "one-line suggested_first_fix. Cite evidence. Return ONLY the JSON.",
+                schema=DIAGNOSIS_SCHEMA, agent_id=base + i, max_nudges=1, vendor=vendor, model=model,
+                phase="diagnose", label="diagnose", agent_type="scout")
+
+        replies = self.signals([_mk(i) for i in range(nn)])
+        votes: dict = {}
+        scout_must: list = []
+        first_fix = ""
+        chain: list = []
+        evid = list(ev0)
+        for r in replies:
+            if not isinstance(r, dict):
+                continue
+            bc = str(r.get("blocker_class") or "unknown")
+            votes[bc] = votes.get(bc, 0) + 1
+            for m in (r.get("must_implement_modules") or []):
+                ms = str(m)
+                # FACT-CHECK vs the static import graph / repo modules (anti-hallucination)
+                if ms in admissible and ms not in scout_must:
+                    scout_must.append(ms)
+            if not first_fix and r.get("suggested_first_fix"):
+                first_fix = str(r.get("suggested_first_fix"))[:300]
+            for c in (r.get("import_chain") or []):
+                if str(c) not in chain:
+                    chain.append(str(c))
+            for e in (r.get("evidence") or []):
+                if str(e) not in evid:
+                    evid.append(str(e)[:200])
+        # AST facts decide blocker_class when the scouts are silent/ungrounded; otherwise scout
+        # majority, but a static collection failure ALWAYS wins (execution-grounded reality).
+        if not collects or ast_must:
+            blocker_class = "collection_error"
+        elif votes:
+            blocker_class = max(votes.items(), key=lambda kv: kv[1])[0]
+        elif ext or addopts_bad:
+            blocker_class = "missing_dependency"
+        else:
+            blocker_class = "implementation_gap"
+        # must-implement closure: AST ground truth UNION fact-checked scout additions.
+        must = list(ast_must)
+        for m in scout_must:
+            if m not in must:
+                must.append(m)
+        fused = {
+            "blocker_class": blocker_class,
+            "collects_cleanly": collects,
+            "must_implement_modules": must,
+            "unresolved_external": ext,
+            "suspect_plugin_addopts": addopts_bad,
+            "import_chain": chain,
+            "import_depth": int(ast_diag.get("import_depth", 0) or 0),
+            "suggested_first_fix": first_fix,
+            "evidence": evid[:12],
+            "first_failing_import": ast_diag.get("first_failing_import"),
+        }
+        self._diagnosis_cache = fused
+        self.log("diagnose: blocker=" + blocker_class + " collects=" + str(collects)
+                 + " must_implement=" + str(len(must)))
+        return fused
+
+    def review_plan(self, plan: dict, *, seam: str, diagnosis: Optional[dict] = None,
+                    residual_ids: Optional[Sequence[str]] = None, n: int = 2,
+                    vendor: Optional[str] = None, model: Optional[str] = None) -> dict:
+        """ADVISORY, diagnosis-grounded plan review at a PLANNING SEAM (decompose / phase-plan /
+        rephase / repair-plan). Repurposes the goal-alignment skeptic pattern but applied at PLAN
+        CREATION rather than only per phase, grounded in the DIAGNOSIS (the real import/collection
+        blocker) and the live residual — not the failing-test list alone (the user directive). It is
+
+          * BOUNDED: at most ONCE per distinct seam (host-side counter), so it can never loop.
+          * ADVISORY: it can recommend a re-scope/re-order (verdict 'revise', with first_modules /
+            missing_modules) but NEVER aborts the run — the worst case is a better-ordered plan.
+          * GROUNDED: a 'revise' must cite first/missing modules supported by the diagnosis
+            must_implement set or the repo module list, else it is downgraded to 'proceed'.
+
+        Returns {verdict: proceed|revise, reason, first_modules, missing_modules, evidence}. GATED by
+        APEX_OMEGA_PLAN_REVIEW; OFF (or already-reviewed seam) -> proceed. Read-only signal."""
+        if os.environ.get("APEX_OMEGA_PLAN_REVIEW", "0").strip().lower() in ("0", "false", "no", "off"):
+            return {"verdict": "proceed", "reason": "plan-review disabled",
+                    "first_modules": [], "missing_modules": [], "evidence": []}
+        seam_key = str(seam or "seam")
+        if seam_key in self._plan_review_seen:
+            return {"verdict": "proceed", "reason": "seam already reviewed",
+                    "first_modules": [], "missing_modules": [], "evidence": []}
+        self._plan_review_seen.add(seam_key)
+        import json as _json
+        from ..journal.key import sha256_hex
+        diag = diagnosis if diagnosis is not None else self.diagnose()
+        must = [str(m) for m in (diag or {}).get("must_implement_modules") or []]
+        plan_modules = [str((m or {}).get("module") or m) for m in (plan or {}).get("modules") or []]
+        plan_mod_set = set(plan_modules)
+        repo_modules = set((self.repo_map or {}).get("modules") or [])
+        admissible = set(must) | repo_modules | plan_mod_set | {m.split(".", 1)[0] for m in must}
+        rid = [str(x) for x in (residual_ids or [])]
+        base = 700900 + int(sha256_hex("review|" + seam_key)[:6], 16) % 80000
+        nn = max(1, int(n))
+
+        def _mk(i):
+            return lambda i=i: self.ask(
+                "You are an ADVISORY plan reviewer at the '" + seam_key + "' planning seam. Judge "
+                "whether the plan does the RIGHT WORK FIRST given the diagnosis — not just whether it "
+                "lists the failing tests. You can recommend a re-scope/re-order but you CANNOT abort.\n\n"
+                + "DIAGNOSIS (the real blocker):\n"
+                + "- blocker_class: " + str((diag or {}).get("blocker_class") or "unknown") + "\n"
+                + "- collects_cleanly: " + str((diag or {}).get("collects_cleanly", True)) + "\n"
+                + "- must_implement (to collect): " + _json.dumps(must[:40]) + "\n"
+                + ("- suggested_first_fix: " + str((diag or {}).get("suggested_first_fix") or "") + "\n")
+                + "\nPLAN MODULES (in planned order): " + _json.dumps(plan_modules[:60]) + "\n"
+                + ("REAL STILL-FAILING IDS: " + _json.dumps(rid[:40]) + "\n" if rid else "")
+                + "\nReturn JSON {verdict: proceed|revise, reason, first_modules, missing_modules, "
+                "evidence}. 'revise' ONLY if the plan ignores a must_implement blocker or sequences a "
+                "dependent module before its prerequisite: put the modules to do FIRST in "
+                "first_modules and any plan-absent prerequisite in missing_modules (modules MUST come "
+                "from the diagnosis or the plan). Otherwise 'proceed'.",
+                schema=REVIEW_PLAN_SCHEMA, agent_id=base + i, max_nudges=1, vendor=vendor, model=model,
+                phase="plan-review", label="review:" + seam_key, agent_type="plan_review")
+
+        replies = self.signals([_mk(i) for i in range(nn)])
+        revise_votes = 0
+        first_mods: list = []
+        missing_mods: list = []
+        reasons: list = []
+        for r in replies:
+            if not isinstance(r, dict):
+                continue
+            v = str(r.get("verdict") or "proceed")
+            fm = [str(x) for x in (r.get("first_modules") or []) if str(x) in admissible]
+            mm = [str(x) for x in (r.get("missing_modules") or []) if str(x) in admissible]
+            grounded = bool(fm or mm)
+            if v == "revise" and not grounded:
+                v = "proceed"          # downgrade an ungrounded re-scope (anti-hallucination)
+            if v == "revise":
+                revise_votes += 1
+                for x in fm:
+                    if x not in first_mods:
+                        first_mods.append(x)
+                for x in mm:
+                    if x not in missing_mods:
+                        missing_mods.append(x)
+                if r.get("reason"):
+                    reasons.append(str(r.get("reason"))[:200])
+        verdict = "revise" if revise_votes > nn / 2.0 else "proceed"
+        if verdict == "proceed":
+            return {"verdict": "proceed", "reason": "; ".join(reasons)[:300] or "on-plan",
+                    "first_modules": [], "missing_modules": [], "evidence": []}
+        self.log("review_plan[" + seam_key + "]: REVISE first=" + str(first_mods[:6])
+                 + " missing=" + str(missing_mods[:6]))
+        return {"verdict": "revise", "reason": "; ".join(reasons)[:300],
+                "first_modules": first_mods, "missing_modules": missing_mods,
+                "evidence": (must[:10] or rid[:10])}
 
     def goal_align_gate(self, plan: dict, phase: dict, *, residual_ids: Sequence[str],
                         stage: str, n: int = 3) -> dict:
