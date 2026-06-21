@@ -4,6 +4,16 @@
 # apex + the commit0 harness need. Create a venv and `pip install -r requirements.txt`,
 # then run everything with PYTHONPATH=. so the vendored ./apex wins.
 
+# --- pydantic ABI pin (F1) ---
+# pydantic ships a Rust extension (pydantic-core) whose ABI is pinned per pydantic
+# minor. A stale pydantic-core (e.g. 2.20.1 left from a partial venv rebuild) against
+# a newer pydantic crashes `import datasets` in repo prep, taking down EVERY eval cell.
+# Keep this in lockstep with PYDANTIC_CORE_PIN in apex_omega/eval/commit0_autogen.py
+# (which also runs a loud preflight check). pydantic 2.11.x is built against
+# pydantic-core 2.46.1; if you bump pydantic, bump BOTH pins together.
+pydantic>=2.11,<3.0
+pydantic-core==2.46.1
+
 # --- apex kernel runtime deps (from apex pyproject) ---
 datasets>=4.0.0,<5.0.0
 huggingface_hub>=1.0.0,<2.0.0

@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -234,15 +234,34 @@ class Journal:
     def commit(self, *, input_hash: str, kind: str, prompt_canonical: str, model_id: str,
                vendor: str, cli_version: str, scoped_inputs_hash: str, result_status: str,
                structured_result: dict, fs_diff_text: str = "", usage: Optional[dict] = None,
-               node_id: str = "", attempt: int = 0) -> JournalEntry:
+               node_id: str = "", attempt: int = 0,
+               gold_passed: Optional[bool] = None, pass_rate: Optional[float] = None,
+               indeterminate: Optional[bool] = None, content_sha: str = "") -> JournalEntry:
         with self._lock:
             seq = self._alloc_seq()
+            # O1/NEW-I5: store the content-addressed diff blob BEFORE we build/append the
+            # entry and BEFORE _index[input_hash] is updated, so a committed (indexed) entry
+            # NEVER references a blob that has not been durably written. The blob is fsynced
+            # via store_diff()->os.replace atomic rename prior to the WAL append below.
             fs_diff_ref = self.store_diff(fs_diff_text) if (self.materialize_diffs and fs_diff_text) else ""
+            # Persist candidate scoring meta into structured_result so a later resume can
+            # reconstruct candidate frontier metadata without re-execution. Only fields the
+            # caller actually provided are written (None => caller did not supply it), and an
+            # explicit key already in structured_result is never clobbered.
+            sr = dict(structured_result) if structured_result is not None else {}
+            for _meta_key, _meta_val in (
+                ("gold_passed", gold_passed),
+                ("pass_rate", pass_rate),
+                ("indeterminate", indeterminate),
+                ("content_sha", content_sha or None),
+            ):
+                if _meta_val is not None and _meta_key not in sr:
+                    sr[_meta_key] = _meta_val
             entry = JournalEntry(
                 seq=seq, input_hash=input_hash, kind=kind,
                 prompt_canonical=prompt_canonical, model_id=model_id, vendor=vendor,
                 cli_version=cli_version, scoped_inputs_hash=scoped_inputs_hash,
-                result_status=result_status, structured_result=structured_result,
+                result_status=result_status, structured_result=sr,
                 fs_diff_ref=fs_diff_ref, usage=usage or {},
                 idempotency_key=f"{self.run_id}::{node_id or input_hash[:12]}::{attempt}",
                 status=STATUS_COMMITTED, ts_logical=seq,
@@ -252,8 +271,48 @@ class Journal:
             if kind == "agent":
                 self._committed_agents += 1   # matches _safe_runner's per-dispatch increment
             if result_status == RESULT_OK:
+                # _index updated LAST: by here the blob is on disk and the WAL record durable.
                 self._index[input_hash] = entry
             return entry
+
+    # -- diff (re)linking -------------------------------------------------
+    def ensure_diff_linked(self, input_hash: str, fs_diff_text: str) -> Optional[JournalEntry]:
+        """Idempotently guarantee the committed entry for ``input_hash`` references a
+        retrievable, content-addressed diff blob (O1/NEW-I5).
+
+        A scored candidate can end up with an empty ``fs_diff_ref`` (e.g. the diff
+        text was produced/scored out-of-band of the original commit), so downstream
+        select/carry would skip the candidate and the best frontier would be lost.
+        This method stores the blob (if needed) AND (re)points the in-memory index
+        entry's ``fs_diff_ref`` to it.
+
+        Critically, this performs an IN-MEMORY ``_index`` relink ONLY — it does NOT
+        append a new WAL record — so journal-replay determinism is preserved (replay
+        rebuilds the index purely from the recorded sequence; relinking is a runtime
+        repair of a blob the content-address makes reproducible anyway).
+
+        No-op (returns the existing entry) if the entry is already linked to the blob
+        that ``fs_diff_text`` hashes to. Returns ``None`` if there is no committed
+        entry for ``input_hash`` or ``fs_diff_text`` is empty.
+        """
+        if not fs_diff_text:
+            return self._index.get(input_hash)
+        with self._lock:
+            entry = self._index.get(input_hash)
+            if entry is None:
+                return None
+            ref = sha256_hex(fs_diff_text)
+            # Already linked to exactly this content-addressed blob: idempotent no-op,
+            # but still make sure the blob is physically present (cheap; store_diff is
+            # itself idempotent and a no-op when the blob already exists).
+            if entry.fs_diff_ref == ref:
+                if self.materialize_diffs:
+                    self.store_diff(fs_diff_text)
+                return entry
+            new_ref = self.store_diff(fs_diff_text) if self.materialize_diffs else ref
+            relinked = replace(entry, fs_diff_ref=new_ref)
+            self._index[input_hash] = relinked
+            return relinked
 
     # -- the central chokepoint (resume_or_run) --------------------------
     def get_or_run(

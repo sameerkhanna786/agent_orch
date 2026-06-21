@@ -1630,6 +1630,110 @@ _COMMIT0_PYTEST_OPTION_PLUGIN_PACKAGE_MODULES = {
     # pytest exited rc=4 (unknown option) BEFORE collection -> correct code scored zero.
     "pytest-memray": "pytest_memray",
 }
+
+# O4/NEW-I7: repo addopts (read by pytest from pyproject/pytest.ini/setup.cfg/tox.ini
+# at runtime) can carry plugin-provided options like ``--memray``. Commit0 scoring
+# runs pytest with PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, so a plugin option whose package
+# is NOT importable in the scoring venv makes pytest exit rc=4 ("unrecognized
+# arguments") BEFORE collection — scoring correct code as zero. This maps each
+# plugin-provided pytest *option* (the literal flag, sans value) to the import module
+# that must be loadable for the option to be recognized. Core pytest options are NOT
+# listed here and are therefore never stripped. The package map above is folded in so
+# both stay in sync.
+_COMMIT0_PYTEST_OPTION_FLAG_PLUGIN_MODULES = {
+    # pytest-memray
+    "--memray": "pytest_memray",
+    "--most-allocations": "pytest_memray",
+    "--stacks": "pytest_memray",
+    "--hide-memray-summary": "pytest_memray",
+    "--memray-bin-path": "pytest_memray",
+    "--memray-bin-prefix": "pytest_memray",
+    "--native": "pytest_memray",
+    "--trace-python-allocators": "pytest_memray",
+    "--fail-on-increase": "pytest_memray",
+    # pytest-cov
+    "--cov": "pytest_cov",
+    "--cov-append": "pytest_cov",
+    "--cov-branch": "pytest_cov",
+    "--cov-config": "pytest_cov",
+    "--cov-context": "pytest_cov",
+    "--cov-fail-under": "pytest_cov",
+    "--cov-report": "pytest_cov",
+    "--cov-reset": "pytest_cov",
+    "--no-cov": "pytest_cov",
+    "--no-cov-on-fail": "pytest_cov",
+    # pytest-timeout
+    "--timeout": "pytest_timeout",
+    "--timeout-method": "pytest_timeout",
+    "--timeout-disable-debugger-detection": "pytest_timeout",
+    "--session-timeout": "pytest_timeout",
+    # pytest-rerunfailures
+    "--reruns": "pytest_rerunfailures",
+    "--reruns-delay": "pytest_rerunfailures",
+    "--only-rerun": "pytest_rerunfailures",
+    # pytest-xdist
+    "-n": "xdist",
+    "--numprocesses": "xdist",
+    "--dist": "xdist",
+    "--tx": "xdist",
+    "--maxschedchunk": "xdist",
+    "--maxprocesses": "xdist",
+    # pytest-benchmark
+    "--benchmark-only": "pytest_benchmark",
+    "--benchmark-disable": "pytest_benchmark",
+    "--benchmark-enable": "pytest_benchmark",
+    "--benchmark-skip": "pytest_benchmark",
+    "--benchmark-autosave": "pytest_benchmark",
+    "--benchmark-save": "pytest_benchmark",
+    "--benchmark-columns": "pytest_benchmark",
+    "--benchmark-group-by": "pytest_benchmark",
+    "--benchmark-sort": "pytest_benchmark",
+    "--benchmark-storage": "pytest_benchmark",
+    "--benchmark-warmup": "pytest_benchmark",
+    "--benchmark-warmup-iterations": "pytest_benchmark",
+    # pytest-json-report
+    "--json-report": "pytest_jsonreport.plugin",
+    "--json-report-file": "pytest_jsonreport.plugin",
+    # pytest-asyncio
+    "--asyncio-mode": "pytest_asyncio.plugin",
+}
+# Pytest options that consume the following token as their value (so stripping the
+# option must also strip its detached value). Only plugin-provided value options are
+# listed; core options never reach the strip path.
+_COMMIT0_PYTEST_PLUGIN_OPTION_FLAGS_WITH_VALUES = frozenset(
+    {
+        "-n",
+        "--numprocesses",
+        "--dist",
+        "--tx",
+        "--maxschedchunk",
+        "--maxprocesses",
+        "--cov",
+        "--cov-config",
+        "--cov-context",
+        "--cov-fail-under",
+        "--cov-report",
+        "--timeout",
+        "--timeout-method",
+        "--session-timeout",
+        "--reruns",
+        "--reruns-delay",
+        "--only-rerun",
+        "--memray-bin-path",
+        "--memray-bin-prefix",
+        "--most-allocations",
+        "--stacks",
+        "--benchmark-save",
+        "--benchmark-columns",
+        "--benchmark-group-by",
+        "--benchmark-sort",
+        "--benchmark-storage",
+        "--benchmark-warmup",
+        "--benchmark-warmup-iterations",
+        "--json-report-file",
+        "--asyncio-mode",
+    }
+)
 # Commit0/Python dependency shadows: when solve agents materialize installed
 # packages at repo root, those paths are environment/harness artifacts, not
 # source repairs. The aliases cover common distribution-name/import-root splits.
@@ -2018,6 +2122,125 @@ def _repo_requested_pytest_option_plugin_modules(
         if module:
             modules.append(module)
     return modules
+
+
+def _read_repo_addopts_tokens(repo_dir: Path) -> list[str]:
+    """Return the ``addopts`` tokens pytest reads from the repo's config.
+
+    O4/NEW-I7: the Commit0 scoring pytest invocation runs ``task.test_cmd`` inside
+    ``repo_dir``, and pytest itself applies ``addopts`` from the first config file it
+    finds (``pyproject.toml [tool.pytest.ini_options]``, ``pytest.ini [pytest]``,
+    ``tox.ini [pytest]``, ``setup.cfg [tool:pytest]``). APEX never passes these
+    tokens explicitly, but they ARE applied — so a plugin option like ``--memray``
+    sitting in addopts can fail the run. This reads them (config-precedence order,
+    first hit wins) so the scoring path can audit/strip unloadable plugin options.
+    """
+    pyproject = repo_dir / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            data = {}
+        ini_options = (
+            data.get("tool", {}).get("pytest", {}).get("ini_options", {})
+            if isinstance(data, dict)
+            else {}
+        )
+        if isinstance(ini_options, dict) and "addopts" in ini_options:
+            return _coerce_addopts_to_tokens(ini_options.get("addopts"))
+
+    for filename, section in (
+        ("pytest.ini", "pytest"),
+        ("tox.ini", "pytest"),
+        ("setup.cfg", "tool:pytest"),
+    ):
+        path = repo_dir / filename
+        if not path.is_file():
+            continue
+        import configparser
+
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(path, encoding="utf-8")
+        except (OSError, configparser.Error):
+            continue
+        if parser.has_option(section, "addopts"):
+            return _coerce_addopts_to_tokens(parser.get(section, "addopts"))
+    return []
+
+
+def _coerce_addopts_to_tokens(addopts: object) -> list[str]:
+    """Normalize a config ``addopts`` value (str or list) to a token list."""
+    if isinstance(addopts, str):
+        try:
+            return shlex.split(addopts)
+        except ValueError:
+            return addopts.split()
+    if isinstance(addopts, (list, tuple)):
+        tokens: list[str] = []
+        for item in addopts:
+            tokens.extend(_coerce_addopts_to_tokens(item))
+        return tokens
+    return []
+
+
+def _addopts_option_plugin_module(token: str) -> Optional[str]:
+    """Return the plugin import module a plugin-provided addopts option needs.
+
+    Returns ``None`` for core pytest options (and unknown options), so those are
+    never stripped. Handles both ``--cov`` and ``--cov=...``/``--cov report`` forms.
+    """
+    if not token.startswith("-"):
+        return None
+    flag = token.split("=", 1)[0]
+    return _COMMIT0_PYTEST_OPTION_FLAG_PLUGIN_MODULES.get(flag)
+
+
+def _strip_unimportable_plugin_addopts(
+    addopts_tokens: list[str],
+    *,
+    is_module_importable: "Callable[[str], bool]",
+) -> tuple[list[str], list[str]]:
+    """Drop addopts options whose plugin is not importable in the scoring venv.
+
+    Returns ``(kept_tokens, stripped_options)``. A plugin-provided option (per
+    ``_COMMIT0_PYTEST_OPTION_FLAG_PLUGIN_MODULES``) is dropped — together with its
+    detached value, when it takes one — iff its plugin module is NOT importable.
+    Core pytest options and loadable-plugin options are always kept. The
+    importability check is memoized per module so each is probed at most once
+    immediately before invocation.
+    """
+    kept: list[str] = []
+    stripped: list[str] = []
+    importable_cache: dict[str, bool] = {}
+
+    def _importable(module: str) -> bool:
+        if module not in importable_cache:
+            importable_cache[module] = bool(is_module_importable(module))
+        return importable_cache[module]
+
+    index = 0
+    total = len(addopts_tokens)
+    while index < total:
+        token = addopts_tokens[index]
+        module = _addopts_option_plugin_module(token)
+        if module is None or _importable(module):
+            kept.append(token)
+            index += 1
+            continue
+        # Plugin not loadable -> strip this option (and its detached value).
+        flag = token.split("=", 1)[0]
+        stripped.append(token)
+        index += 1
+        if (
+            "=" not in token
+            and flag in _COMMIT0_PYTEST_PLUGIN_OPTION_FLAGS_WITH_VALUES
+            and index < total
+            and not addopts_tokens[index].startswith("-")
+        ):
+            stripped.append(addopts_tokens[index])
+            index += 1
+    return kept, stripped
 
 
 def _loads_pytest_asyncio_plugin(modules: set[str]) -> bool:
@@ -14382,6 +14605,22 @@ print("APEX_COMMIT0_SOLVE_NETWORK_BOUNDARY_OK")
         if not _pytest_command_has_exact_option(option_tokens, "--cache-clear"):
             extras.append("--cache-clear")
 
+        # O4/NEW-I7: pytest applies the repo's config ``addopts`` at runtime, so a
+        # plugin option there (e.g. pydantic's ``--memray``) makes the autoload-
+        # disabled scoring run exit rc=4 ("unrecognized arguments") BEFORE
+        # collection unless its plugin is loadable. Strip only the unloadable
+        # plugin options (keeping core + loadable ones) by overriding addopts via
+        # ``-o addopts=...``. The importability probe runs against the scoring venv
+        # immediately before invocation, and every stripped option is logged.
+        if repo_dir is not None:
+            addopts_override = self._commit0_addopts_strip_override(
+                repo_dir=repo_dir,
+                python_executable=python_executable,
+                task=task,
+            )
+            if addopts_override is not None:
+                extras.append(addopts_override)
+
         if extras:
             test_cmd = f"{test_cmd} {' '.join(extras)}"
         test_cmd = _bound_commit0_pytest_output(test_cmd)
@@ -14396,6 +14635,55 @@ print("APEX_COMMIT0_SOLVE_NETWORK_BOUNDARY_OK")
             f'{report_dir_prefix}export PYTHONPATH="{python_path}:$PYTHONPATH" && '
             f"{ids_filter_prefix}{test_cmd}"
         )
+
+    def _commit0_addopts_strip_override(
+        self,
+        *,
+        repo_dir: Path,
+        python_executable: str,
+        task: Commit0Task,
+    ) -> Optional[str]:
+        """Build an ``-o addopts=...`` override stripping unloadable plugin opts.
+
+        Returns ``None`` when there is nothing to strip (no repo addopts, or every
+        plugin option is loadable) so the scoring command is unchanged in the common
+        case. When at least one plugin option is unloadable, returns a single
+        ``-o addopts=<surviving tokens>`` token (or ``-o addopts=`` to clear it) and
+        logs every stripped option for auditability.
+        """
+        addopts_tokens = _read_repo_addopts_tokens(repo_dir)
+        if not addopts_tokens:
+            return None
+
+        venv_python = Path(python_executable)
+
+        def _is_importable(module: str) -> bool:
+            try:
+                probe = self._run_command(
+                    repo_dir,
+                    f'{shlex.quote(str(venv_python))} -c "import {module}"',
+                    timeout=60,
+                )
+            except Exception:  # pragma: no cover - probe must never crash scoring
+                return False
+            return getattr(probe, "returncode", 1) == 0
+
+        kept, stripped = _strip_unimportable_plugin_addopts(
+            addopts_tokens,
+            is_module_importable=_is_importable,
+        )
+        if not stripped:
+            return None
+        for option in stripped:
+            logger.warning(
+                "[commit0][addopts-strip] task=%s repo=%s dropped unloadable plugin "
+                "addopts option %r (plugin not importable in scoring venv); pytest "
+                "would otherwise exit rc=4 before collection",
+                getattr(task, "task_id", getattr(task, "instance_id", "?")),
+                repo_dir,
+                option,
+            )
+        return f"-o addopts={shlex.quote(' '.join(kept))}"
 
     def _commit0_pytest_xdist_worker_spec(
         self,

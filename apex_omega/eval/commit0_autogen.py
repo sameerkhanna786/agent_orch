@@ -49,6 +49,118 @@ from ..engine.runtime import Engine
 from .scoring import verification_from_commit0_evaluation
 
 
+# --- F1: pydantic-core <-> pydantic ABI pin guard ------------------------------
+# pydantic ships a Rust extension (``pydantic_core``) whose ABI is pinned per
+# pydantic minor: a stale ``pydantic_core`` (e.g. 2.20.1 left behind by a partial
+# venv rebuild) against a newer ``pydantic`` (e.g. needing 2.46.1) crashes at the
+# very first ``import datasets`` in v1 repo prep — taking down EVERY cell before a
+# single agent runs.  The fix lives in requirements.txt (pydantic-core==2.46.1),
+# but a venv rebuild can silently re-skew it, so we ALSO assert the invariant loud
+# and early.  This is a CHECK ONLY — it never installs anything at runtime.
+#
+# pydantic >=2.x exposes ``pydantic.version.VERSION`` and, since 2.x, the exact
+# pydantic-core it was built against via ``pydantic.version.version_short()`` /
+# the pinned dependency.  We compare the importable ``pydantic_core.__version__``
+# against pydantic's declared requirement and fail with an actionable message.
+
+# The pydantic-core pin that matches the pydantic in requirements.txt. Keep this
+# in lockstep with requirements.txt (``pydantic-core==...``).
+PYDANTIC_CORE_PIN = "2.46.1"
+
+# Env var to bypass the guard (mirrors APEX_OMEGA_SKIP_AUTH_PREFLIGHT). Use only
+# when you have intentionally diverged the pin and know the ABI still matches.
+SKIP_PYDANTIC_CHECK_ENV = "APEX_OMEGA_SKIP_PYDANTIC_CHECK"
+
+
+def _required_pydantic_core(pydantic_mod) -> Optional[str]:
+    """Best-effort: the pydantic-core version THIS pydantic build expects.
+
+    pydantic pins ``pydantic-core`` to an exact version in its own metadata.  We
+    read it from importlib metadata (the requirement string), falling back to the
+    repo's :data:`PYDANTIC_CORE_PIN` when metadata is unavailable.  Returns the
+    exact required version string, or None if it cannot be determined."""
+    try:
+        import importlib.metadata as _md
+
+        for req in (_md.requires("pydantic") or []):
+            # e.g. "pydantic-core==2.46.1" (may carry a ; marker we ignore)
+            head = req.split(";", 1)[0].strip()
+            name, _, spec = head.partition("==")
+            if name.strip().replace("_", "-").lower() == "pydantic-core" and spec.strip():
+                return spec.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _pydantic_core_verdict(
+    installed_core: Optional[str],
+    pyd_version: Optional[str],
+    required: Optional[str],
+    *,
+    fail_loud: bool = True,
+) -> tuple[bool, str]:
+    """Pure compare core for :func:`check_pydantic_core_compat` (no imports, so it
+    is unit-testable without pydantic installed).  ``installed_core``/``required``
+    are exact version strings.  Returns ``(ok, detail)``; on mismatch with
+    ``fail_loud`` (and no :data:`SKIP_PYDANTIC_CHECK_ENV` override) raises a clear,
+    actionable ``RuntimeError``.  CHECK ONLY — never installs or mutates anything."""
+    installed_core = installed_core or "unknown"
+    pyd_version = pyd_version or "unknown"
+    required = required or PYDANTIC_CORE_PIN
+
+    if installed_core == required:
+        return (True, f"pydantic {pyd_version} / pydantic_core {installed_core} OK")
+
+    detail = (
+        f"pydantic-core MISMATCH: installed pydantic_core=={installed_core} but "
+        f"pydantic {pyd_version} requires pydantic-core=={required}"
+    )
+    if fail_loud and os.environ.get(SKIP_PYDANTIC_CHECK_ENV) != "1":
+        raise RuntimeError(
+            "pydantic preflight FAILED -> " + detail + ". This crashes "
+            "`import datasets` in v1 repo prep for EVERY cell. Repin with "
+            f"`uv pip install pydantic-core=={required}` (or "
+            "`pip install -r requirements.txt`) and retry, or set "
+            + SKIP_PYDANTIC_CHECK_ENV + "=1 to bypass. Aborting before the run "
+            "burns the whole matrix on import-time crashes.")
+    return (False, detail)
+
+
+def check_pydantic_core_compat(
+    *,
+    expected_pin: Optional[str] = None,
+    fail_loud: bool = True,
+) -> tuple[bool, str]:
+    """Assert the installed ``pydantic_core`` matches the installed ``pydantic``.
+
+    A mismatch is the F1 blocker: it crashes ``import datasets`` (hence v1 repo
+    prep) for every cell.  Returns ``(ok, detail)``.  With ``fail_loud`` (and no
+    :data:`SKIP_PYDANTIC_CHECK_ENV` override) a mismatch raises a clear
+    ``RuntimeError`` telling the operator exactly how to repin.  CHECK ONLY — it
+    never installs or mutates the environment.
+
+    ``expected_pin`` overrides the auto-detected requirement (used by tests).
+    """
+    try:
+        import pydantic as _pyd
+        import pydantic_core as _pydc
+    except Exception as exc:
+        detail = f"pydantic / pydantic_core not importable: {exc!r}"
+        if fail_loud and os.environ.get(SKIP_PYDANTIC_CHECK_ENV) != "1":
+            raise RuntimeError(
+                "pydantic preflight FAILED: " + detail
+                + ". Install the eval requirements (pip install -r requirements.txt) "
+                "or set " + SKIP_PYDANTIC_CHECK_ENV + "=1 to bypass.")
+        return (False, detail)
+
+    installed_core = getattr(_pydc, "__version__", None)
+    pyd_version = getattr(_pyd, "VERSION", None)
+    required = expected_pin or _required_pydantic_core(_pyd) or PYDANTIC_CORE_PIN
+    return _pydantic_core_verdict(
+        installed_core, pyd_version, required, fail_loud=fail_loud)
+
+
 # --- P0.1: per-worktree editable resolution (src-layout false-zero fix) --------
 # v1's repo prep does ``pip install -e .`` against the BASE repo_dir, pinning the
 # editable importer at base/src/<pkg>.  ``score_fn`` runs pytest in the candidate
@@ -239,6 +351,12 @@ def run_autogen_cell(
 
         os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+        # --- F1) PYDANTIC ABI PREFLIGHT: a stale pydantic_core (partial venv rebuild) crashes
+        # `import datasets` in v1 repo prep for EVERY cell before any agent runs. Fail loud +
+        # early with a repin instruction (CHECK only; never installs).
+        _pyd_ok, _pyd_detail = check_pydantic_core_compat()
+        engine.log(f"pydantic preflight: {_pyd_detail}")
 
         # --- 0) AUTH PREFLIGHT: refresh + validate vendor auth BEFORE prep/agents, so a stale
         # gateway token never silently burns the whole cell on 0-token infra_nonresult results
