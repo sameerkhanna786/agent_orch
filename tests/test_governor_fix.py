@@ -62,6 +62,34 @@ def _vcand(cid, *, errors=0, gold=0, total=100, failing=None, excerpts="", empty
               "failing_nodeids": failing, "failure_excerpts": excerpts})
 
 
+# ----------------------------------------------------------------- per-agent timeout env override
+def _ctx_rm(repo_map, timeout_seconds=86400):
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=1000)
+    return OrchestrationContext(
+        eng, executor=FakeExecutor(), worker_specs=[WorkerSpec("codex_cli", "m")],
+        source_repo=_repo(), base_commit=None, score_fn=lambda wt: VerificationResult(),
+        prompt_builder=lambda c, i, s: "solve", max_agents=64,
+        repo_map=repo_map, timeout_seconds=timeout_seconds)
+
+
+def test_per_agent_timeout_difficulty_default():
+    assert _ctx_rm({"difficulty": "hard"}).per_agent_timeout_seconds == 3000
+    assert _ctx_rm({"difficulty": "medium"}).per_agent_timeout_seconds == 2400
+    assert _ctx_rm({"difficulty": "easy"}).per_agent_timeout_seconds == 1800
+
+
+def test_per_agent_timeout_env_override(monkeypatch):
+    # hard repos (pydantic/networkx) need a longer wall so productive long agents finish + bank.
+    monkeypatch.setenv("APEX_OMEGA_AGENT_TIMEOUT_HARD", "5400")
+    assert _ctx_rm({"difficulty": "hard"}).per_agent_timeout_seconds == 5400
+    assert _ctx_rm({"difficulty": "medium"}).per_agent_timeout_seconds == 2400   # untouched
+    # global fallback applies to any difficulty without a specific override
+    monkeypatch.setenv("APEX_OMEGA_AGENT_TIMEOUT", "1234")
+    assert _ctx_rm({"difficulty": "medium"}).per_agent_timeout_seconds == 1234
+    # still clamped below the cell timeout
+    assert _ctx_rm({"difficulty": "hard"}, timeout_seconds=900).per_agent_timeout_seconds == 900
+
+
 # ----------------------------------------------------------------- Fix 3: unified harness ceiling
 def test_fix3_in_cell_harness_stall_unified_to_indet_ceil():
     ctx = _ctx()

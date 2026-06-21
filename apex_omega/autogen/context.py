@@ -287,6 +287,19 @@ class OrchestrationContext:
         # < the cell timeout; None when the cell is unbounded (agents run to completion).
         _diff = str((self.repo_map or {}).get("difficulty") or "").lower()
         _pa = {"easy": 1800, "medium": 2400, "hard": 3000}.get(_diff, 2400)
+        # ENV OVERRIDE (live-run tuning): codex agents are API/REASONING-bound, so a too-short
+        # per-agent wall ABANDONS productive long agents on the hardest repos (pydantic collection-
+        # collapse, networkx's 253 files) at the cap — engine heartbeat fires, the work is lost, and
+        # the repo never accumulates a bankable diff. Lower concurrency does NOT help (the wall is
+        # server-side reasoning, not local CPU). APEX_OMEGA_AGENT_TIMEOUT_{EASY,MEDIUM,HARD} (or the
+        # global APEX_OMEGA_AGENT_TIMEOUT) lets the operator give the hard repos room to finish.
+        _pa_env = (os.environ.get("APEX_OMEGA_AGENT_TIMEOUT_" + (_diff.upper() or "MEDIUM"))
+                   or os.environ.get("APEX_OMEGA_AGENT_TIMEOUT"))
+        if _pa_env:
+            try:
+                _pa = max(60, int(_pa_env))
+            except ValueError:
+                pass
         self.per_agent_timeout_seconds = None if timeout_seconds is None else min(_pa, int(timeout_seconds))
         # HARD CEILING on test-driven repair depth. Clamps every solve_and_repair/
         # make_repairing_attempt call, so an authored orchestrator can never EXCEED the
