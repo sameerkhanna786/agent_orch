@@ -354,6 +354,77 @@ def test_sarp_pre_open_skips_trivial_and_advancing():
     assert ctx.should_continue_waves() is False and ctx._sarp_state is None
 
 
+def _all_wrong_repo() -> str:
+    d = Path(tempfile.mkdtemp()) / "repo"
+    d.mkdir()
+    (d / "mod.py").write_text("def a():\n    return 0\n\ndef b():\n    return 0\n\ndef c():\n    return 0\n")
+    (d / "test_mod.py").write_text(
+        "from mod import a, b, c\n\ndef test_a():\n    assert a() == 1\n\n"
+        "def test_b():\n    assert b() == 2\n\ndef test_c():\n    assert c() == 3\n")
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                ["git", "-c", "user.email=a@b.c", "-c", "user.name=x", "commit", "-qm", "base"]):
+        subprocess.run(cmd, cwd=d, check=True, capture_output=True)
+    return str(d)
+
+
+def _near_candidate(repo):
+    """A real 2/3 candidate (fixes a,b, NOT c) with a genuine non-empty diff — so
+    _best_coherent_candidate (which skips empty diffs) returns it for the rescue."""
+    from apex_omega.kernel.verify import candidate_from_verification
+    p = Path(repo) / "mod.py"
+    orig = p.read_text()
+    p.write_text("def a():\n    return 1\n\ndef b():\n    return 2\n\ndef c():\n    return 0\n")
+    diff = subprocess.run(["git", "-C", repo, "diff"], capture_output=True, text=True).stdout
+    p.write_text(orig)
+    vr = VerificationResult(accepted=False, score=0.66, passed=2, failed=1, total=3,
+                            pass_rate=0.66, failing_nodeids=["test_mod.py::test_c"])
+    return candidate_from_verification(
+        candidate_id="near", diff=diff, vr=vr, rollout_id=1, cluster_id=1,
+        meta={"gold_passed": 2, "gold_total": 3, "failing_nodeids": ["test_mod.py::test_c"],
+              "failure_excerpts": "assert c() == 3  ->  assert 0 == 3"})
+
+
+def test_sarp_rescue_engages_and_terminates():
+    """The robust post-loop rescue: given a banked non-trivial near-solve (2/3), sarp_rescue must
+    DIAGNOSE the residual + run bounded re-aim rungs, and TERMINATE within the rung budget even when
+    the repair stays sterile (never fakes a solve). Governor-timing-independent."""
+    os.environ["APEX_OMEGA_SARP"] = "1"
+    os.environ["APEX_OMEGA_SARP_TOTAL_RUNG_BUDGET"] = "3"
+    calls = {"diag": 0, "repair": 0}
+
+    def responder(task, session):
+        props = (task.schema or {}).get("properties") or {}
+        if "root_cause_class" in props:
+            calls["diag"] += 1
+            return ExecResult(structured_output={"root_cause_class": "semantic_logic_bug",
+                              "direction": "fix c", "target_ids": ["test_mod.py::test_c"],
+                              "evidence_ids": ["test_mod.py::test_c"]},
+                              ok=True, finalization_status="completed", usage=TokenUsage(input=1, output=1))
+        calls["repair"] += 1
+        return ExecResult(final_message="noop", ok=True, finalization_status="completed",
+                          usage=TokenUsage(input=1, output=1))   # never fixes c -> stays sterile
+
+    repo = _all_wrong_repo()
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=999)
+    ctx = OrchestrationContext(
+        eng, executor=FakeExecutor(responder), worker_specs=[WorkerSpec("codex_cli", "gpt-5.5")],
+        source_repo=repo, base_commit=None, score_fn=_real_pytest_score(_IDS),
+        prompt_builder=lambda c, i, s: "solve", max_agents=999, initial_agents=1,
+        repo_map={"modules": ["mod"]})
+    ctx._all_candidates.append(_near_candidate(repo))
+    ctx._best_gold_passed = 2
+    out = ctx.sarp_rescue([{"module": "mod", "gold_test_ids": _IDS}])
+    assert calls["diag"] >= 1, "rescue did not diagnose the residual"
+    assert ctx._sarp_total_used <= 3, "rescue exceeded the per-run rung budget"
+    assert out is None or not out.accepted, "rescue faked a solve"   # Cardinal: never self-accepts
+
+
+def test_sarp_rescue_off_is_none():
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
+    ctx = _ctx(eng, _near_solve_repo())
+    assert ctx.sarp_rescue([{"module": "mod", "gold_test_ids": _IDS}]) is None
+
+
 def test_sarp_episode_opens_in_wave_state_chokepoint():
     """REGRESSION (the 3rd live-run bug): the governor cut often fires during the un-hooked FAN-OUT
     (ctx.parallel -> _wave_verdict -> _halted) before the loop runs. The SARP pre-open MUST live in

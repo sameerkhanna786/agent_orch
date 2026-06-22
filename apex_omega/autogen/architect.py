@@ -647,6 +647,12 @@ def phase_planned_solve(engine: Engine, ctx, repo_map: dict):
             ctx.defer("plan_abort", ph.get("name"), g2.get("reason") or "")
             engine.log("goal-gate ABORT (post) phase=" + str(ph.get("name")) + ": " + str(g2.get("reason")))
             break
+    # SARP last-mile rescue: before abstaining on a non-trivial near-solve residual, explicitly
+    # diagnose the gap's direction + re-aim (bounded). Governor-timing-independent. No-op (None) when
+    # SARP is off -> falls through to the normal engine-owned select (abstain).
+    rescued = ctx.sarp_rescue(modules)
+    if rescued is not None:
+        return rescued
     return ctx.select(ctx.all_candidates())               # engine-owned; may be None (abstain)
 
 

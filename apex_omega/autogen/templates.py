@@ -166,6 +166,12 @@ def orchestrate(ctx):
             carry = red["merged_diff"]
         residual = red["residual_failing_ids"]
 
+    # SARP last-mile rescue: before verify/abstain on a non-trivial near-solve residual, diagnose the
+    # gap's direction + re-aim (bounded, governor-independent). No-op when SARP off (byte-identical).
+    rescued = ctx.sarp_rescue(modules)
+    if rescued is not None and rescued.accepted:
+        ctx.log("SOLVED via SARP last-mile rescue")
+        return rescued
     # (4) VERIFY/HARDEN (medium/hard only): skeptics try to REFUTE the leader; a completeness
     # critic flags gaps. These can only DOWNGRADE a cheat/incomplete pass, never promote one.
     ctx.phase("verify")

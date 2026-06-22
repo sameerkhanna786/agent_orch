@@ -2801,6 +2801,94 @@ class OrchestrationContext:
         # (e) ladder exhausted for this residual with no rise -> terminal stuck (cut fires next).
         return self._sarp_terminal_stuck(residual, "ladder exhausted with no frontier rise")
 
+    def sarp_rescue(self, modules: Sequence[dict], *,
+                    scope_ids: Optional[Sequence[str]] = None) -> Optional[Candidate]:
+        """EXPLICIT post-loop adaptation — the robust last-mile path that does NOT depend on governor
+        cut timing (the in-loop _sarp_holds/_wave_state pre-open proved fragile because the cut fires
+        via many routes — fan-out parallel, cross-phase stale signals — before sarp_step engages).
+        Called AFTER the solve loop, BEFORE the orchestrator abstains on a non-trivial near-solve: it
+        OBSERVES the best partial's residual + WHY (excerpts), DIAGNOSES the gap's direction (read-only
+        scouts), and runs the bounded diagnosis-driven ladder until a full solve / genuinely-stuck /
+        the per-RUN rung budget is spent. Returns a verified-accepted Candidate if one is reached, else
+        the best banked candidate (ctx.select). No-op (None) when SARP is off -> OFF byte-identical.
+
+        Termination: every round spends >=1 rung against the per-RUN non-resettable _sarp_total_used
+        ceiling (<= APEX_OMEGA_SARP_TOTAL_RUNG_BUDGET), and a residual that exhausts its targeted budget
+        with no frontier rise stops the loop — so it cannot spin. Cardinal: every rung routes through
+        repair_residual/ralph_loop -> _attempt, so only ctx.select on the full suite accepts."""
+        if not self._sarp_on():
+            return None
+        total_budget = self._sarp_env_int("APEX_OMEGA_SARP_TOTAL_RUNG_BUDGET", 12)
+        targeted_max = self._sarp_env_int("APEX_OMEGA_SARP_TARGETED_MAX", 2)
+        max_distinct = self._sarp_env_int("APEX_OMEGA_SARP_MAX_DISTINCT_RESIDUALS", 4)
+        seen_sha: dict = {}
+        last_frontier = -1
+        rounds = 0
+        while self._sarp_total_used < total_budget and not self._sarp_stuck:
+            best = self._best_coherent_candidate()
+            if best is None:
+                break
+            bm = best.meta or {}
+            residual = [str(x) for x in (bm.get("failing_nodeids") or [])]
+            gold_total = int(bm.get("gold_total") or 0)
+            best_gp = int(self._best_gold_passed)
+            if not residual or not self._sarp_frontier_nontrivial(best_gp, gold_total):
+                break                                   # nothing left / trivial -> let the abstain stand
+            sha = self.residual_set_sha(residual)
+            if sha not in seen_sha and len(seen_sha) >= max_distinct:
+                break                                   # G2: too many distinct residuals -> stop (thrash)
+            if seen_sha.get(sha, 0) >= targeted_max:
+                break                                   # this residual exhausted its targeted budget
+            excerpts = bm.get("failure_excerpts") or ""
+            carry = (best.diff or "") or self.carry_best()
+            diag = self.diagnose_residual(residual, excerpts=excerpts, carry_diff=carry)
+            if diag.get("stuck"):
+                try:
+                    self.defer("sarp_stuck", sha, diag.get("reason") or "rescue: unsolvable")
+                except Exception:
+                    pass
+                break
+            rcc = str(diag.get("root_cause_class") or "semantic_logic_bug")
+            direction = str(diag.get("direction") or "")
+            seen_sha[sha] = seen_sha.get(sha, 0) + 1
+            self._sarp_total_used += 1
+            rounds += 1
+            if rcc == "coupling_integration":
+                self.log("sarp-rescue: coherent integrate (coupling)")
+                w = self.ralph_loop(id_base=816000 + rounds, seed_carry=self.carry_best(),
+                                    brief=self.integrator_brief(modules, residual))
+                new = [w] if w is not None else []
+            else:
+                tgt = [t for t in (diag.get("target_ids") or []) if t in set(residual)] or residual
+                sarp_prompt = (
+                    "Make EXACTLY these STILL-failing gold tests pass — they survived every prior repair "
+                    "round, so a near-miss repeat will NOT work; fix the ACTUAL cause:\n"
+                    + "\n".join(map(str, tgt[:60])) + "\n\n"
+                    + ("FAILURE DETAIL (assertion tails / errors — the WHY each one fails):\n"
+                       + str(excerpts)[:3000] + "\n\n" if excerpts else "")
+                    + "DIAGNOSED ROOT CAUSE: " + rcc + "\n"
+                    + ("DIRECTION: " + direction + "\n" if direction else "")
+                    + ("LIKELY TARGET SYMBOL: " + str(diag.get("target_symbol")) + "\n"
+                       if diag.get("target_symbol") else "")
+                    + "Files implemented by earlier agents are PRESENT — build ON them, do not revert. "
+                    "Edit only source; do NOT touch test files. Iterate until the listed subset is green.\n")
+                self.log("sarp-rescue: targeted re-aim (" + rcc + ", " + str(len(tgt))
+                         + " ids, with excerpts)")
+                c = self.repair_residual(tgt, carry_diff=carry, excerpts=excerpts, prompt=sarp_prompt,
+                                         attempt_id=716000 + self._sarp_total_used)
+                new = [c] if c is not None else []
+            red = self.reduce_residuals([x for x in new if x is not None], carry_diff=carry,
+                                        scope_ids=scope_ids)
+            if red.get("accepted"):
+                self.log("sarp-rescue: SOLVED via adaptive re-aim")
+                return red.get("candidate")
+            # a genuine frontier rise resets this residual's per-sha budget (it's making progress);
+            # otherwise the per-sha cap above ends the loop on a stuck residual.
+            if int(self._best_gold_passed) > last_frontier:
+                last_frontier = int(self._best_gold_passed)
+                seen_sha[sha] = 0 if red.get("advanced") else seen_sha[sha]
+        return self.select(self.all_candidates())
+
     def repair_residual(self, residual_ids: Sequence[str], *, carry_diff: str,
                         excerpts: str = "", attempt_id: Optional[int] = None,
                         round: int = 0, vendor: Optional[str] = None,
