@@ -2425,7 +2425,11 @@ class OrchestrationContext:
                       # gold_passed lets the orchestrator distinguish a CLIMBING partial (enter
                       # loop-until-dry) from a TOTAL collapse (route to SELECT/best-of-N), so a
                       # majority-conflict merge that still made progress is not thrown to best-of-N.
-                      "gold_passed": int(out_gp), "floored": floored,
+                      "gold_passed": int(out_gp),
+                      # SARP needs the gold-suite size to judge a NON-TRIVIAL (near-solve) frontier;
+                      # without it _sarp_frontier_nontrivial saw gold_total=0 and never engaged (the
+                      # bug that left SARP inert in the live run despite the 6151/6159 plateau).
+                      "gold_total": int(getattr(vr, "total", 0) or 0), "floored": floored,
                       "conflicts": list(conflicts), "indeterminate": bool(indeterminate or vr.indeterminate),
                       # merge-reduce v2 coupled-repo telemetry (pure-Python, zero-LLM, replay-safe):
                       # how badly the textual merge SHED work this round (the coupled-plateau signal).

@@ -273,5 +273,52 @@ def test_sarp_targeted_reaim_advances_near_solve():
     assert seen["excerpts"] is True, "failure excerpts were not threaded to the repair agent"
 
 
+def test_reduce_residuals_exposes_gold_total():
+    """REGRESSION (the live-run bug): reduce_residuals' RESULT dict must expose gold_total — without it
+    SARP's _sarp_frontier_nontrivial saw 0 and never engaged at the 6151/6159 plateau."""
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
+    ctx = _ctx(eng, _near_solve_repo())
+    red = ctx.reduce_residuals([], carry_diff="", scope_ids=_IDS)
+    assert "gold_total" in red and red["gold_total"] == 3
+    assert red["gold_passed"] == 2          # 2/3 pass on the base
+    assert "failure_excerpts" in red        # the other SARP plumbing field
+
+
+def test_sarp_fires_via_real_reduce_path():
+    """INTEGRATION: drive SARP off the REAL reduce_residuals output (not a hand-crafted red), so the
+    gold_total / advanced / excerpts plumbing is exercised end-to-end. A sterile near-solve round must
+    open an episode, diagnose, re-aim, and reach a full solve."""
+    os.environ["APEX_OMEGA_SARP"] = "1"
+
+    def responder(task, session):
+        props = (task.schema or {}).get("properties") or {}
+        if "root_cause_class" in props:
+            return ExecResult(structured_output={
+                "root_cause_class": "semantic_logic_bug", "direction": "c() must return 3",
+                "target_ids": ["test_mod.py::test_c"], "evidence_ids": ["test_mod.py::test_c"]},
+                ok=True, finalization_status="completed", usage=TokenUsage(input=1, output=1))
+        # the targeted-repair agent fixes c()
+        Path(session.cwd, "mod.py").write_text(
+            "def a():\n    return 1\n\ndef b():\n    return 2\n\ndef c():\n    return 3\n")
+        return ExecResult(final_message="fixed", ok=True, finalization_status="completed",
+                          usage=TokenUsage(input=1, output=1))
+
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=999)
+    ctx = _ctx(eng, _near_solve_repo(), responder=responder)
+    mods = [{"module": "mod", "gold_test_ids": _IDS}]
+    r1 = ctx.reduce_residuals([], carry_diff="", scope_ids=_IDS)   # frontier 0->2 (advanced)
+    assert r1["advanced"] is True
+    r2 = ctx.reduce_residuals([], carry_diff="", scope_ids=_IDS)   # 2->2 (STERILE near-solve)
+    assert r2["advanced"] is False and r2["gold_total"] == 3 and r2["gold_passed"] == 2
+    # The load-bearing regression guard for the live-run bug: SARP must ENGAGE off the real reduce
+    # output (gold_total present -> non-trivial frontier recognized). out is not None == a rung ran;
+    # before the gold_total fix this returned None (inert) despite the sterile near-solve.
+    out = ctx.sarp_step(r2, mods)
+    assert out is not None, "SARP did not fire on a sterile near-solve from the real reduce path"
+    assert ctx._sarp_total_used >= 1, "SARP returned a result but spent no adaptation rung"
+    # (the full-solve OUTCOME is covered by test_sarp_targeted_reaim_advances_near_solve; the
+    # FakeExecutor does not faithfully capture the repair diff, so we assert ENGAGEMENT here.)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
