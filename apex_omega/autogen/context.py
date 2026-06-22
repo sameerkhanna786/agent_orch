@@ -2453,6 +2453,8 @@ class OrchestrationContext:
             if self._sarp_on():
                 self._sarp_last = {"residual": list(out_residual),
                                    "gold_total": int(getattr(vr, "total", 0) or 0),
+                                   "gold_passed": int(out_gp),
+                                   "excerpts": out_excerpts,
                                    "advanced": bool(merge_gp > prior_frontier),
                                    "indeterminate": bool(indeterminate or vr.indeterminate)}
             if scope_ids is not None:
@@ -2824,23 +2826,31 @@ class OrchestrationContext:
         seen_sha: dict = {}
         last_frontier = -1
         rounds = 0
+        self.log("sarp-rescue: entered (best_gold_passed=" + str(self._best_gold_passed) + ")")
         while self._sarp_total_used < total_budget and not self._sarp_stuck:
+            # Source the residual from _sarp_last (set by EVERY reduce, populated even when all phases
+            # passed their subsets) — NOT _best_coherent_candidate, which filters empty-diff candidates
+            # and returned None on the all-phases-pass path (the live engagement failure). Fall back to
+            # the best candidate's meta / last_residual if _sarp_last is absent.
+            last = self._sarp_last or {}
             best = self._best_coherent_candidate()
-            if best is None:
-                break
-            bm = best.meta or {}
-            residual = [str(x) for x in (bm.get("failing_nodeids") or [])]
-            gold_total = int(bm.get("gold_total") or 0)
+            bm = (best.meta or {}) if best is not None else {}
+            residual = [str(x) for x in (last.get("residual")
+                        or bm.get("failing_nodeids") or self._last_residual or [])]
+            gold_total = int(last.get("gold_total") or bm.get("gold_total") or 0)
             best_gp = int(self._best_gold_passed)
             if not residual or not self._sarp_frontier_nontrivial(best_gp, gold_total):
+                self.log("sarp-rescue: break (residual=" + str(len(residual)) + " gold_total="
+                         + str(gold_total) + " best_gp=" + str(best_gp) + " nontrivial="
+                         + str(self._sarp_frontier_nontrivial(best_gp, gold_total)) + ")")
                 break                                   # nothing left / trivial -> let the abstain stand
             sha = self.residual_set_sha(residual)
             if sha not in seen_sha and len(seen_sha) >= max_distinct:
                 break                                   # G2: too many distinct residuals -> stop (thrash)
             if seen_sha.get(sha, 0) >= targeted_max:
                 break                                   # this residual exhausted its targeted budget
-            excerpts = bm.get("failure_excerpts") or ""
-            carry = (best.diff or "") or self.carry_best()
+            excerpts = last.get("excerpts") or bm.get("failure_excerpts") or ""
+            carry = self.carry_best() or (best.diff if best is not None else "") or ""
             diag = self.diagnose_residual(residual, excerpts=excerpts, carry_diff=carry)
             if diag.get("stuck"):
                 try:

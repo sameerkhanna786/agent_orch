@@ -419,6 +419,61 @@ def test_sarp_rescue_engages_and_terminates():
     assert out is None or not out.accepted, "rescue faked a solve"   # Cardinal: never self-accepts
 
 
+def test_sarp_rescue_fires_when_all_phases_pass_residual_remains():
+    """REGRESSION (the 6th/real live bug): when ALL phases pass their subsets, _best_coherent_candidate
+    returned None (empty-diff filter / banking) and sarp_rescue bailed without engaging. Sourcing the
+    residual from _sarp_last (set by every reduce) fixes it. Drives the full phase_planned_solve path
+    on a 3-test repo where phases cover a,b but c stays failing (unscoped residual)."""
+    from apex_omega.autogen.architect import phase_planned_solve
+    os.environ["APEX_OMEGA_SARP"] = "1"
+    os.environ["APEX_OMEGA_SARP_TOTAL_RUNG_BUDGET"] = "3"
+    d = Path(tempfile.mkdtemp()) / "repo"
+    d.mkdir()
+    for m in ("a", "b", "c"):
+        (d / ("mod_" + m + ".py")).write_text("def " + m + "():\n    return 0\n")
+    (d / "test_a.py").write_text("from mod_a import a\ndef test_a():\n    assert a()==1\n")
+    (d / "test_b.py").write_text("from mod_b import b\ndef test_b():\n    assert b()==2\n")
+    (d / "test_c.py").write_text("from mod_c import c\ndef test_c():\n    assert c()==3\n")
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                ["git", "-c", "user.email=a@b.c", "-c", "user.name=x", "commit", "-qm", "b"]):
+        subprocess.run(cmd, cwd=d, check=True, capture_output=True)
+    ids3 = ["test_a.py::test_a", "test_b.py::test_b", "test_c.py::test_c"]
+
+    def responder(task, session):
+        pr = (task.schema or {}).get("properties") or {}
+        if "modules" in pr and "phases" not in pr:
+            return ExecResult(structured_output={"modules": [
+                {"module": "mod_a", "gold_test_ids": ["test_a.py::test_a"], "depends_on": []},
+                {"module": "mod_b", "gold_test_ids": ["test_b.py::test_b"], "depends_on": []}],
+                "order": ["mod_a", "mod_b"]}, ok=True, finalization_status="completed",
+                usage=TokenUsage(input=1, output=1))
+        if "phases" in pr:
+            return ExecResult(structured_output={"phases": [
+                {"name": "pa", "objective": "a", "modules": ["mod_a"],
+                 "acceptance_gold_ids": ["test_a.py::test_a"], "depends_on": []},
+                {"name": "pb", "objective": "b", "modules": ["mod_b"],
+                 "acceptance_gold_ids": ["test_b.py::test_b"], "depends_on": []}]},
+                ok=True, finalization_status="completed", usage=TokenUsage(input=1, output=1))
+        if "root_cause_class" in pr:
+            return ExecResult(structured_output={"root_cause_class": "semantic_logic_bug",
+                              "direction": "fix c", "target_ids": ["test_c.py::test_c"],
+                              "evidence_ids": ["test_c.py::test_c"]}, ok=True,
+                              finalization_status="completed", usage=TokenUsage(input=1, output=1))
+        Path(session.cwd, "mod_a.py").write_text("def a():\n    return 1\n")
+        Path(session.cwd, "mod_b.py").write_text("def b():\n    return 2\n")  # fix a,b; never c
+        return ExecResult(final_message="ab", ok=True, finalization_status="completed",
+                          usage=TokenUsage(input=1, output=1))
+
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=300)
+    ctx = OrchestrationContext(
+        eng, executor=FakeExecutor(responder), worker_specs=[WorkerSpec("codex_cli", "m")],
+        source_repo=str(d), base_commit=None, score_fn=_real_pytest_score(ids3),
+        prompt_builder=lambda c, i, s: "x", max_agents=300, initial_agents=1,
+        repo_map={"difficulty": "medium"})
+    phase_planned_solve(eng, ctx, ctx.repo_map)
+    assert ctx._sarp_total_used >= 1, "SARP rescue did not engage on the all-phases-pass residual path"
+
+
 def test_sarp_rescue_off_is_none():
     eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=64)
     ctx = _ctx(eng, _near_solve_repo())
