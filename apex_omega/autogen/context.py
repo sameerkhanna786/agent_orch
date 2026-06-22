@@ -508,6 +508,8 @@ class OrchestrationContext:
         self._sarp_seen_residual_shas: set = set()   # distinct residual shas that re-armed per-sha bounds (G2)
         self._sarp_redecompose_seen: set = set()     # one re-decompose per residual sha (mirrors _plan_review_seen)
         self._sarp_stuck: bool = False               # terminal: diagnosis said genuinely-unsolvable
+        self._sarp_last: Optional[dict] = None        # last reduce's {residual, gold_total, advanced}
+        # for should_continue_waves() to pre-open an episode (defer the cut) at a sterile plateau
         # O1/NEW-I2: on a RESUME, rebuild the candidate frontier from the durable kind="candidate"
         # journal records BEFORE any new wave runs, so carry_best()/select/reduce never see a partial
         # set that silently drops the best diff (the networkx 2220->13 loss). Fresh run => no-op.
@@ -920,6 +922,7 @@ class OrchestrationContext:
         with ctx.parallel: ``while ctx.should_continue_waves(): cands += ctx.parallel(...)``."""
         if self._halted:
             return False
+        self._sarp_maybe_open()      # pre-open a SARP episode at a sterile plateau so the verdict defers
         return self._wave_verdict(self._wave_state())
 
     # ---- read-accessors for escalation patterns ----
@@ -2438,6 +2441,14 @@ class OrchestrationContext:
                       "max_rejected_hunks": int(max_rejected), "n_partial_merged": int(n_partial),
                       "conflict_frac": (len(conflicts) / max(1, n_cands)),
                       "advanced": bool(merge_gp > prior_frontier)}
+            # SARP: remember this reduce's plateau signals so should_continue_waves() can pre-open an
+            # episode (and defer the governor cut) even when the cut would otherwise fire at the loop
+            # TOP before sarp_step (loop BOTTOM) gets to engage — the cut-before-engage timing bug.
+            if self._sarp_on():
+                self._sarp_last = {"residual": list(out_residual),
+                                   "gold_total": int(getattr(vr, "total", 0) or 0),
+                                   "advanced": bool(merge_gp > prior_frontier),
+                                   "indeterminate": bool(indeterminate or vr.indeterminate)}
             if scope_ids is not None:
                 # PURE SET TEST over the EFFECTIVE residual (the merge's, or the floored best tree's): a
                 # phase passes iff ALL its acceptance gold ids are absent from the failing set AND the
@@ -2533,6 +2544,34 @@ class OrchestrationContext:
         self._sarp_state = None
         self.log("sarp: STOP (" + str(reason)[:120] + ") -> hand back to governor (cut will fire)")
         return None
+
+    def _sarp_maybe_open(self) -> None:
+        """Pre-open a SARP episode from should_continue_waves() when the LAST reduce showed a sterile
+        (non-advancing, valid) round at a non-trivial frontier and no episode is active. This is the
+        cut-before-engage fix: the governor cut is evaluated at the loop TOP, but sarp_step opens the
+        episode only at the loop BOTTOM — so when the no-progress streak is already at threshold on loop
+        entry (e.g. inherited from the un-hooked fan-out phase) the cut would fire before SARP ever
+        engages. Opening the episode here makes _sarp_holds defer that cut so the loop's sarp_step gets
+        its turn. Gated/bounded exactly like _sarp_observe; never runs a rung itself (read-of-state +
+        set _sarp_state only) so it stays replay-deterministic (the journaled verdict reflects it)."""
+        if not self._sarp_on() or self._sarp_state is not None or self._sarp_stuck:
+            return
+        last = self._sarp_last
+        if not last or last.get("advanced") or last.get("indeterminate"):
+            return
+        residual = last.get("residual") or []
+        if not residual:
+            return
+        if not self._sarp_frontier_nontrivial(int(self._best_gold_passed), int(last.get("gold_total", 0) or 0)):
+            return
+        total_budget = self._sarp_env_int("APEX_OMEGA_SARP_TOTAL_RUNG_BUDGET", 12)
+        if self._sarp_total_used >= total_budget:
+            return
+        self._sarp_state = {"open_frontier": int(self._best_gold_passed), "targeted": {},
+                            "rungs_used": [], "nontrivial": True,
+                            "rungs_remaining": self._sarp_env_int("APEX_OMEGA_SARP_RUNGS_PER_EPISODE", 3)}
+        self.log("sarp: episode opened at sterile plateau (frontier "
+                 + str(self._best_gold_passed) + "/" + str(last.get("gold_total")) + ") -> defer cut")
 
     def diagnose_residual(self, residual_ids: Sequence[str], *, excerpts: str = "",
                           carry_diff: str = "", n: Optional[int] = None,

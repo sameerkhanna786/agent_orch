@@ -320,5 +320,39 @@ def test_sarp_fires_via_real_reduce_path():
     # FakeExecutor does not faithfully capture the repair diff, so we assert ENGAGEMENT here.)
 
 
+def test_sarp_pre_opens_episode_to_defer_cut_before_engage():
+    """REGRESSION (the 2nd live-run bug): when the no-progress/sterile streak is ALREADY at the cut
+    threshold on loop entry (inherited from the un-hooked fan-out), the governor cut fires at the loop
+    TOP before sarp_step (loop BOTTOM) opens an episode -> SARP never engages. should_continue_waves()
+    must pre-open the episode at a sterile non-trivial plateau so the cut is deferred."""
+    os.environ["APEX_OMEGA_SARP"] = "1"
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=999)
+    ctx = _ctx(eng, _near_solve_repo())
+    ctx._best_gold_passed = 6151
+    ctx._sterile_streak = 999                 # governor would fire cut:sterile-diff-streak
+    ctx._sarp_last = {"residual": ["test_mod.py::test_c"], "gold_total": 6159,
+                      "advanced": False, "indeterminate": False}
+    assert ctx._sarp_state is None
+    cont = ctx.should_continue_waves()
+    assert cont is True, "SARP did not defer the cut at a sterile near-solve plateau"
+    assert ctx._sarp_state is not None, "SARP episode was not pre-opened"
+
+
+def test_sarp_pre_open_skips_trivial_and_advancing():
+    """_sarp_maybe_open must NOT open on a trivial frontier or an advancing/indeterminate last reduce."""
+    os.environ["APEX_OMEGA_SARP"] = "1"
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=999)
+    ctx = _ctx(eng, _near_solve_repo())
+    ctx._sterile_streak = 999
+    # trivial frontier -> no open -> cut fires
+    ctx._best_gold_passed = 10
+    ctx._sarp_last = {"residual": ["x"], "gold_total": 6159, "advanced": False, "indeterminate": False}
+    assert ctx.should_continue_waves() is False and ctx._sarp_state is None
+    # advancing last reduce -> no open
+    ctx._best_gold_passed = 6151
+    ctx._sarp_last = {"residual": ["x"], "gold_total": 6159, "advanced": True, "indeterminate": False}
+    assert ctx.should_continue_waves() is False and ctx._sarp_state is None
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
