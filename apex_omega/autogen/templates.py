@@ -136,7 +136,7 @@ def orchestrate(ctx):
     rnd = 0
     while ctx.should_continue_waves() and not red["accepted"]:
         targets = residual or ctx.module_gold_ids(modules)
-        c = ctx.repair_residual(targets, carry_diff=carry, round=rnd)
+        c = ctx.repair_residual(targets, carry_diff=carry, round=rnd, excerpts=ctx.repair_excerpts(red))
         rnd = rnd + 1
         red = ctx.reduce_residuals([c], carry_diff=carry)
         if red["accepted"]:
@@ -311,7 +311,7 @@ def orchestrate(ctx):
     rnd = 0
     while ctx.should_continue_waves() and not red["accepted"]:   # loop-until-dry on the live tree
         targets = residual or ctx.module_gold_ids(modules)
-        c = ctx.repair_residual(targets, carry_diff=carry, round=rnd)
+        c = ctx.repair_residual(targets, carry_diff=carry, round=rnd, excerpts=ctx.repair_excerpts(red))
         rnd = rnd + 1
         red = ctx.reduce_residuals([c], carry_diff=carry)
         if red["accepted"]:

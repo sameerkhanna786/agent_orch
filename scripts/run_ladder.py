@@ -223,6 +223,30 @@ ARMS = [
                           "APEX_OMEGA_DIAG": "1", "APEX_OMEGA_PLAN_REVIEW": "1", "APEX_OMEGA_PHASE0": "1",
                           "APEX_OMEGA_SARP": "1",
                           "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    # ===== EXCERPTS x SCOUT 2x2 factorial (DIAGNOSE_CADENCE_RESEARCH.md). The 4 cells isolate the
+    # two ingredients of diagnose-directed re-aim: the ~free failure EXCERPTS (every base-loop repair
+    # wave sees WHY, via APEX_OMEGA_REPAIR_EXCERPTS_LOOP) x the costly SCOUT diagnosis (APEX_OMEGA_SARP).
+    #   excerpts off / scout off = hybrid-diag (control, above)
+    #   excerpts on  / scout off = hybrid-diag-excerpts  (isolates the free win)
+    #   excerpts off / scout on  = hybrid-diag-sarp (above)
+    #   excerpts on  / scout on  = hybrid-diag-sarp-excerpts (both)
+    # Metric: agents-to-frontier-ceiling (sterile-churn tail; 60-84% wasted at near-solve) + solve-rate.
+    #   LADDER_ARMS=hybrid-diag,hybrid-diag-excerpts,hybrid-diag-sarp,hybrid-diag-sarp-excerpts \
+    #   LADDER_REPOS=mimesis,babel LADDER_SEEDS=3 python scripts/run_ladder.py
+    ("hybrid-diag-excerpts", ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                              "--autogen-max-agents", _OMEGA_MAX],
+                             {"APEX_OMEGA_ORCHESTRATION": "hybrid", "APEX_OMEGA_PHASE_PLANNER": "1",
+                              "APEX_OMEGA_GOAL_GATE": "0",
+                              "APEX_OMEGA_DIAG": "1", "APEX_OMEGA_PLAN_REVIEW": "1", "APEX_OMEGA_PHASE0": "1",
+                              "APEX_OMEGA_REPAIR_EXCERPTS_LOOP": "1",
+                              "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    ("hybrid-diag-sarp-excerpts", ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                                   "--autogen-max-agents", _OMEGA_MAX],
+                                  {"APEX_OMEGA_ORCHESTRATION": "hybrid", "APEX_OMEGA_PHASE_PLANNER": "1",
+                                   "APEX_OMEGA_GOAL_GATE": "0",
+                                   "APEX_OMEGA_DIAG": "1", "APEX_OMEGA_PLAN_REVIEW": "1", "APEX_OMEGA_PHASE0": "1",
+                                   "APEX_OMEGA_SARP": "1", "APEX_OMEGA_REPAIR_EXCERPTS_LOOP": "1",
+                                   "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
     ("hybrid-codegen", ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
                         "--autogen-max-agents", _OMEGA_MAX],
                        {"APEX_OMEGA_ORCHESTRATION": "hybrid", "APEX_OMEGA_PHASE_PLANNER": "1",

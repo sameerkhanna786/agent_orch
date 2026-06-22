@@ -1889,7 +1889,8 @@ class OrchestrationContext:
         while (self.should_continue_waves() and not red.get("accepted")
                and not red.get("phase_passed")):
             residual = [r for r in (red.get("residual_failing_ids") or []) if r in scope_set] or scope_ids
-            c = self.repair_residual(residual, carry_diff=carry, attempt_id=rep_base + rnd, round=rnd)
+            c = self.repair_residual(residual, carry_diff=carry, attempt_id=rep_base + rnd, round=rnd,
+                                     excerpts=self.repair_excerpts(red))
             rnd += 1
             red = self.reduce_residuals([c], carry_diff=carry, scope_ids=scope_ids)
             if red.get("merged_diff"):
@@ -2898,6 +2899,25 @@ class OrchestrationContext:
                 last_frontier = int(self._best_gold_passed)
                 seen_sha[sha] = 0 if red.get("advanced") else seen_sha[sha]
         return self.select(self.all_candidates())
+
+    def repair_excerpts(self, red: Optional[dict]) -> str:
+        """Base-loop excerpt gate (DIAGNOSE_CADENCE_RESEARCH.md). Returns the residual's
+        failure_excerpts (the assertion tails = WHY each residual fails) for threading into a
+        base-loop repair_residual call, IFF APEX_OMEGA_REPAIR_EXCERPTS_LOOP is enabled; else "" so the
+        call is byte-identical to today (excerpts="" -> empty excerpt_block in repair_residual ->
+        identical prompt -> identical journal key -> no new agents).
+
+        This is the cheap "earlier helps" win: reduce_residuals already computes failure_excerpts at
+        zero token cost (banked in red["failure_excerpts"]) but the base loop-until-dry / run_phase
+        repair waves discarded it, re-rolling near-misses blind to WHY. Distinct from:
+          * APEX_OMEGA_REPAIR_EXCERPTS (the repair_attempt Reflexion redaction path, default ON) — a
+            DIFFERENT name + path; do not conflate.
+          * APEX_OMEGA_SARP — the SARP repair sites pass excerpts DIRECTLY (not via this helper), so
+            SARP's excerpts are independent of this flag in both directions."""
+        if os.environ.get("APEX_OMEGA_REPAIR_EXCERPTS_LOOP", "0").strip().lower() in (
+                "0", "false", "no", "off", ""):
+            return ""
+        return str((red or {}).get("failure_excerpts") or "")
 
     def repair_residual(self, residual_ids: Sequence[str], *, carry_diff: str,
                         excerpts: str = "", attempt_id: Optional[int] = None,
