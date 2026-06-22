@@ -66,10 +66,13 @@ def test_diagnose_off_is_noop():
 def test_diagnose_fuses_ast_and_scout_and_factchecks():
     os.environ["APEX_OMEGA_DIAG"] = "1"
     # AST pre-pass result is normally injected by build_repo_map; inject it directly on repo_map.
+    _conftest_block = [{"module": "pkg.schema", "symbol": "GenerateSchema",
+                        "importer": "conftest.py", "reason": "missing_symbol"}]
     ast_diag = {
         "collects_cleanly": False,
-        "unresolved_internal": [{"module": "pkg.schema", "symbol": "GenerateSchema",
-                                 "importer": "conftest.py", "reason": "missing_symbol"}],
+        "unresolved_internal": _conftest_block,
+        "conftest_unresolved": _conftest_block,
+        "must_implement_modules": ["pkg.schema"],
         "unresolved_external": [], "import_depth": 1, "addopts": "",
         "suspect_plugin_addopts": [], "evidence": ["1 unresolved internal import"],
         "first_failing_import": {"module": "pkg.schema", "symbol": "GenerateSchema"},

@@ -1899,11 +1899,10 @@ class OrchestrationContext:
         import json as _json
         from ..journal.key import sha256_hex
         ast_diag = dict((self.repo_map or {}).get("diagnosis") or {})
-        ast_must = []
-        for u in ast_diag.get("unresolved_internal", []) or []:
-            m = u.get("module")
-            if m and m not in ast_must:
-                ast_must.append(m)
+        # ast_must = the CONFTEST-level blocker closure (the genuine collection wall), NOT every
+        # test-file unresolved import (which is incremental work, handled by the normal solve flow).
+        from .diagnose_ast import must_implement_modules as _must_impl_modules
+        ast_must = _must_impl_modules(ast_diag)
         repo_modules = set((self.repo_map or {}).get("modules") or [])
         # the admissible grounding set: EXACTLY the AST-derived must-implement modules + the repo's
         # own module names. A scout must_implement entry outside this set is hallucinated and dropped
