@@ -354,5 +354,22 @@ def test_sarp_pre_open_skips_trivial_and_advancing():
     assert ctx.should_continue_waves() is False and ctx._sarp_state is None
 
 
+def test_sarp_episode_opens_in_wave_state_chokepoint():
+    """REGRESSION (the 3rd live-run bug): the governor cut often fires during the un-hooked FAN-OUT
+    (ctx.parallel -> _wave_verdict -> _halted) before the loop runs. The SARP pre-open MUST live in
+    _wave_state() — the chokepoint BOTH ctx.parallel and should_continue_waves flow through — so SARP
+    defers the cut wherever it is evaluated. This asserts _wave_state itself opens the episode."""
+    os.environ["APEX_OMEGA_SARP"] = "1"
+    eng = Engine(tempfile.mkdtemp(), run_id="t", max_total_agents=999)
+    ctx = _ctx(eng, _near_solve_repo())
+    ctx._best_gold_passed = 6151
+    ctx._sarp_last = {"residual": ["test_mod.py::test_c"], "gold_total": 6159,
+                      "advanced": False, "indeterminate": False}
+    assert ctx._sarp_state is None
+    st = ctx._wave_state()                         # the shared chokepoint (parallel + loop verdict)
+    assert ctx._sarp_state is not None, "SARP episode not opened in _wave_state chokepoint"
+    assert st.get("sarp_enabled") is True and st.get("sarp_frontier_nontrivial") is True
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

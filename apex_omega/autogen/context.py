@@ -847,6 +847,13 @@ class OrchestrationContext:
     def _wave_state(self) -> dict:
         """The cut-losses detector inputs at the current wave boundary. All cut signals are in
         ATTEMPTS (agents), so the rule is invariant to the wave schedule and the arm width."""
+        # SARP: pre-open an episode at a sterile non-trivial plateau BEFORE the verdict is computed,
+        # so governor._sarp_holds can defer the cut. This MUST be in _wave_state (the chokepoint BOTH
+        # ctx.parallel's fan-out verdict AND should_continue_waves' loop verdict flow through) — the
+        # cut often fires during the un-hooked FAN-OUT (ctx.parallel -> _wave_verdict -> _halted) before
+        # the loop's sarp_step ever runs, and should_continue_waves' `if _halted: return False` would
+        # then skip SARP entirely. No-op when SARP off / no plateau (OFF byte-identical).
+        self._sarp_maybe_open()
         agents = self._engine.agents_used()
         # SPFG+ wall arm: the journaled VALID-measurement wall seconds since the frontier last rose.
         # 0 until the clock has started (first valid measurement). Reconstructed deterministically
@@ -922,8 +929,7 @@ class OrchestrationContext:
         with ctx.parallel: ``while ctx.should_continue_waves(): cands += ctx.parallel(...)``."""
         if self._halted:
             return False
-        self._sarp_maybe_open()      # pre-open a SARP episode at a sterile plateau so the verdict defers
-        return self._wave_verdict(self._wave_state())
+        return self._wave_verdict(self._wave_state())   # _wave_state() pre-opens any SARP episode
 
     # ---- read-accessors for escalation patterns ----
     def all_candidates(self) -> list:
