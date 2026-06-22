@@ -207,6 +207,34 @@ REVIEW_PLAN_SCHEMA = {
     },
 }
 
+# RESIDUAL_DIAGNOSIS_SCHEMA — ctx.diagnose_residual() per-scout reply (SARP last-mile stage). When the
+# frontier plateaus at a NON-trivial near-solve, read-only scouts read the still-failing tests + their
+# failure EXCERPTS (assertion tails = WHY) + the implicated source and classify the gap's ROOT CAUSE +
+# the needed DIRECTION (not just the failing count). Distance-to-goal is direction, not magnitude. The
+# verdict SELECTS which bounded adaptation rung fires. Read-only SIGNAL: never a Candidate, never accepts.
+RESIDUAL_DIAGNOSIS_SCHEMA = {
+    "type": "object",
+    "required": ["root_cause_class", "direction"],
+    "properties": {
+        # missing_shared_symbol: a helper/symbol the residual tests need is absent.
+        # semantic_logic_bug: it runs but the logic is wrong (the safe targeted-repair default).
+        # fixture_env_import: a fixture / env / import problem specific to the residual.
+        # coupling_integration: the residual is a cross-module integration/coupling issue.
+        # unsolvable: genuinely stuck (missing external dep, contradictory spec) -> stop adapting.
+        "root_cause_class": {"type": "string", "enum": [
+            "missing_shared_symbol", "semantic_logic_bug", "fixture_env_import",
+            "coupling_integration", "unsolvable"]},
+        "direction": {"type": "string"},                                  # qualitative WHICH-WAY
+        "target_ids": {"type": "array", "items": {"type": "string"}},     # residual subset to aim at
+        "target_symbol": {"type": "string"},
+        "target_files": {"type": "array", "items": {"type": "string"}},
+        "sub_clusters": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+        "stuck": {"type": "boolean"},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "reason": {"type": "string"},
+    },
+}
+
 # SANDBOX-NOT-PROMPT POLICY (user directive 2026-06-16): we do NOT limit the model via
 # prompts and we do NOT penalize/kill an attempt for trying to fetch/cheat. The CORRECTNESS
 # BOUNDARY is structural — the worktree's source SHADOWS any site-packages install (cwd for
@@ -472,6 +500,14 @@ class OrchestrationContext:
         # O2/O3/O4 redesign: diagnosis cache (computed once) + per-seam plan-review bound (iters=1).
         self._diagnosis_cache: Optional[dict] = None
         self._plan_review_seen: set = set()
+        # SARP (State-Aware Adaptive Replanning) controller state — the last-mile fix. All gated by
+        # APEX_OMEGA_SARP (default off => these stay inert and the run is byte-identical).
+        self._sarp_state: Optional[dict] = None      # per-EPISODE state (None == no active plateau episode)
+        self._sarp_total_used: int = 0               # per-RUN, NON-resettable rung counter (global SARP ceiling)
+        self._sarp_residual_diag_cache: dict = {}    # residual-sha -> RESIDUAL_DIAGNOSIS (replay-safe)
+        self._sarp_seen_residual_shas: set = set()   # distinct residual shas that re-armed per-sha bounds (G2)
+        self._sarp_redecompose_seen: set = set()     # one re-decompose per residual sha (mirrors _plan_review_seen)
+        self._sarp_stuck: bool = False               # terminal: diagnosis said genuinely-unsolvable
         # O1/NEW-I2: on a RESUME, rebuild the candidate frontier from the durable kind="candidate"
         # journal records BEFORE any new wave runs, so carry_best()/select/reduce never see a partial
         # set that silently drops the best diff (the networkx 2220->13 loss). Fresh run => no-op.
@@ -828,6 +864,9 @@ class OrchestrationContext:
             "valid_measurements_since_improvement": max(0, self._valid_measurements - self._valid_measurements_at_best),
             "seconds_since_frontier_improved": secs,
             "indeterminate_streak": self._indeterminate_streak,
+            # SARP ADAPT-BEFORE-CUT keys (inert {"sarp_enabled": False} when off / no active episode).
+            # The verdict is journaled by wave position, so resume replays it identically regardless.
+            **self._sarp_wave_state_extra(),
         }
 
     # ---- journaled wave decision (Backbone 2.0 determinism-under-resume) ----
@@ -1866,6 +1905,14 @@ class OrchestrationContext:
                         "accepted_full": bool(getattr(w, "accepted", False)),
                         "candidate": w, "conflicts": list(red.get("conflicts") or []),
                     }
+            # SARP: state-aware adaptive replanning. On a sterile round at a non-trivial frontier,
+            # diagnose the residual gap + re-aim (excerpts+direction) before the governor cuts. Returns
+            # a refreshed red the loop adopts; OFF / no-episode -> None -> byte-identical.
+            sred = self.sarp_step(red, mods, scope_ids=scope_ids)
+            if sred is not None:
+                red = sred
+                if red.get("merged_diff"):
+                    carry = red["merged_diff"]
         return {
             "merged_diff": carry, "residual": list(red.get("residual_failing_ids") or []),
             "phase_passed": bool(red.get("phase_passed")),
@@ -2354,6 +2401,9 @@ class OrchestrationContext:
             out_residual = list(vr.failing_nodeids)
             out_gp = merge_gp
             out_cand = cand
+            # SARP: carry the EFFECTIVE failure excerpts (assertion tails = WHY each residual fails),
+            # so the inner loop / diagnose_residual sees the cause, not just the list of ids.
+            out_excerpts = getattr(vr, "failure_excerpts", "") or ""
             if (not vr.indeterminate) and merge_gp < prior_frontier:
                 best = self._best_coherent_candidate(exclude_id=cand.candidate_id)
                 best_gp = int((getattr(best, "meta", {}) or {}).get("gold_passed", 0) or 0) if best else -1
@@ -2363,10 +2413,14 @@ class OrchestrationContext:
                     out_diff = best.diff or ""
                     out_residual = list((best.meta or {}).get("failing_nodeids") or [])
                     out_gp = best_gp
+                    out_excerpts = (best.meta or {}).get("failure_excerpts") or ""
                     self.log(f"reduce_residuals: NO-SILENT-LOSS floor — merge gold {merge_gp} < best "
                              f"{best_gp}; carrying the best coherent tree forward (not the regressed merge)")
             self._last_residual = list(out_residual)
             result = {"merged_diff": out_diff, "residual_failing_ids": list(out_residual),
+                      # SARP plumbing (pure ADDITION; OFF-inert — no existing caller reads it): the
+                      # assertion tails for the residual, so the inner loop can re-aim by WHY not just WHICH.
+                      "failure_excerpts": out_excerpts,
                       "accepted": bool(cand.accepted), "candidate": out_cand,
                       # gold_passed lets the orchestrator distinguish a CLIMBING partial (enter
                       # loop-until-dry) from a TOTAL collapse (route to SELECT/best-of-N), so a
@@ -2408,6 +2462,295 @@ class OrchestrationContext:
         # fall back to the worktree-relative diff (unstaged) when the base-rev form is empty.
         res2 = _git("diff", "--binary", *_SCAFFOLD_PATHSPEC, cwd=wt)
         return res2.stdout if res2.returncode == 0 else ""
+
+    # ---- SARP: State-Aware Adaptive Replanning (the last-mile fix; gated APEX_OMEGA_SARP) --------
+    # When the frontier plateaus at a NON-TRIVIAL near-solve and the inner repair loop goes sterile,
+    # the governor would cut a few tests short (the mimesis 6146/6159 case). SARP instead OBSERVES the
+    # distance (residual ids + WHY from failure_excerpts), DIAGNOSES the gap read-only (root cause +
+    # DIRECTION), and runs ONE bounded diagnosis-DRIVEN adaptation rung before the cut. It is gated OFF
+    # by default (byte-identical), strictly bounded (per-episode pool + per-RUN non-resettable ceiling +
+    # distinct-residual cap) so it terminates strictly before the agent ceiling, never calls
+    # _reset_patience (so the sterile streak keeps climbing and cut:harness-stall stays reachable), and
+    # is a SIGNAL path only (every rung dispatches through _attempt -> only ctx.select on the full suite
+    # ever accepts; Cardinal Contract intact).
+    def _sarp_on(self) -> bool:
+        return os.environ.get("APEX_OMEGA_SARP", "0").strip().lower() not in ("0", "false", "no", "off")
+
+    def _sarp_env_int(self, name: str, default: int) -> int:
+        try:
+            v = os.environ.get(name, "")
+            return int(v) if v.strip() else int(default)
+        except (ValueError, TypeError):
+            return int(default)
+
+    def _sarp_env_float(self, name: str, default: float) -> float:
+        try:
+            v = os.environ.get(name, "")
+            return float(v) if v.strip() else float(default)
+        except (ValueError, TypeError):
+            return float(default)
+
+    def residual_set_sha(self, residual_ids: Sequence[str]) -> str:
+        from ..journal.key import sha256_hex
+        return sha256_hex("|".join(sorted(str(x) for x in (residual_ids or []))))
+
+    def _sarp_frontier_nontrivial(self, best_gold_passed: int, gold_total: int) -> bool:
+        gt = int(gold_total or 0)
+        if gt <= 0:
+            return False
+        frac = self._sarp_env_float("APEX_OMEGA_SARP_FLOOR_FRAC", 0.50)
+        ab = self._sarp_env_int("APEX_OMEGA_SARP_FLOOR_ABS", 1)
+        # near-solve by ratio (default >=50%), OR an explicit high absolute floor if the operator set one.
+        return (best_gold_passed / gt >= frac) or (ab > 1 and best_gold_passed >= ab)
+
+    def _sarp_wave_state_extra(self) -> dict:
+        """The 5 SARP keys the governor's _sarp_holds reads. Inert (sarp_enabled False) when SARP is
+        off or no episode is active -> the governor cuts exactly as today (OFF byte-identical)."""
+        if not self._sarp_on() or self._sarp_state is None:
+            return {"sarp_enabled": False}
+        st = self._sarp_state
+        total_budget = self._sarp_env_int("APEX_OMEGA_SARP_TOTAL_RUNG_BUDGET", 12)
+        return {
+            "sarp_enabled": True,
+            "sarp_frontier_nontrivial": bool(st.get("nontrivial")),
+            "sarp_stuck": bool(self._sarp_stuck),
+            "sarp_rungs_remaining": int(st.get("rungs_remaining", 0)),
+            "sarp_total_budget_remaining": max(0, total_budget - self._sarp_total_used),
+        }
+
+    def _sarp_terminal_stuck(self, residual: Sequence[str], reason: str) -> None:
+        """End the SARP episode terminally: defer the residual, set the stuck flag so the governor's
+        pre-check no longer holds, and let the existing cut fire on the next verdict. Returns None."""
+        try:
+            self.defer("sarp_stuck", self.residual_set_sha(residual), str(reason)[:200])
+        except Exception:
+            pass
+        self._sarp_stuck = True
+        self._sarp_state = None
+        self.log("sarp: STOP (" + str(reason)[:120] + ") -> hand back to governor (cut will fire)")
+        return None
+
+    def diagnose_residual(self, residual_ids: Sequence[str], *, excerpts: str = "",
+                          carry_diff: str = "", n: Optional[int] = None,
+                          vendor: Optional[str] = None, model: Optional[str] = None) -> dict:
+        """SARP rung 0 (read-only). N scouts read the still-failing tests + their failure excerpts (the
+        WHY) and classify the gap's ROOT CAUSE + needed DIRECTION (not just the failing count). Sibling
+        of diagnose(); ctx.signals fan-out (no plateau accounting), fact-checked against the real
+        residual ids (ungrounded coupling/unsolvable downgraded to semantic_logic_bug). Cached per
+        residual-sha (replay-safe). Gated APEX_OMEGA_SARP -> {} when off. NEVER a Candidate / accept."""
+        if not self._sarp_on():
+            return {}
+        rids = [str(x) for x in (residual_ids or [])]
+        if not rids:
+            return {}
+        sha = self.residual_set_sha(rids)
+        if sha in self._sarp_residual_diag_cache:
+            return self._sarp_residual_diag_cache[sha]
+        import json as _json
+        from ..journal.key import sha256_hex
+        nn = max(1, int(n if n is not None else self._sarp_env_int("APEX_OMEGA_SARP_DIAG_N", 2)))
+        rid_set = set(rids)
+        base = 701700 + int(sha256_hex("sarp|" + sha)[:6], 16) % 80000
+
+        def _mk(i):
+            return lambda i=i: self.ask(
+                "You are a READ-ONLY diagnostic scout at the LAST-MILE of a solve. These gold tests are "
+                "STILL FAILING after repeated repair rounds that stopped making progress. Determine the "
+                "ROOT CAUSE and the NEEDED DIRECTION to fix them — not just that they fail.\n\n"
+                + "STILL-FAILING TEST NODE-IDS:\n" + _json.dumps(rids[:60]) + "\n\n"
+                + ("FAILURE DETAIL (assertion tails / errors — the WHY):\n" + str(excerpts)[:3000] + "\n\n"
+                   if excerpts else "")
+                + "Classify root_cause_class (missing_shared_symbol | semantic_logic_bug | "
+                "fixture_env_import | coupling_integration | unsolvable) and give a concrete DIRECTION "
+                "(one or two sentences on what to change). Put the residual ids you are most confident "
+                "about in target_ids, the implicated symbol in target_symbol, files in target_files, and "
+                "(if the residual splits into independent groups) sub_clusters. Set stuck=true ONLY if "
+                "the residual is genuinely unsolvable from inside the repo (missing external dependency, "
+                "contradictory spec). Cite residual ids in evidence_ids. Return ONLY the JSON.",
+                schema=RESIDUAL_DIAGNOSIS_SCHEMA, agent_id=base + i, max_nudges=1,
+                vendor=vendor, model=model, phase="sarp-diagnose", label="sarp_diag",
+                agent_type="sarp_scout")
+
+        replies = self.signals([_mk(i) for i in range(nn)])
+        votes: dict = {}
+        tids: list = []
+        tfiles: list = []
+        clusters: list = []
+        stuck_votes = 0
+        direction = ""
+        symbol = ""
+        reason = ""
+        for r in replies:
+            if not isinstance(r, dict):
+                continue
+            ev = [str(x) for x in (r.get("evidence_ids") or [])]
+            rtids = [str(x) for x in (r.get("target_ids") or [])]
+            grounded = any(e in rid_set for e in ev) or any(t in rid_set for t in rtids)
+            rc = str(r.get("root_cause_class") or "semantic_logic_bug")
+            # anti-hallucination: an ungrounded coupling/unsolvable verdict -> safe targeted default
+            if rc in ("coupling_integration", "unsolvable") and not grounded:
+                rc = "semantic_logic_bug"
+            votes[rc] = votes.get(rc, 0) + 1
+            for t in rtids:
+                if t in rid_set and t not in tids:
+                    tids.append(t)
+            for f in (r.get("target_files") or []):
+                if str(f) not in tfiles:
+                    tfiles.append(str(f))
+            for cl in (r.get("sub_clusters") or []):
+                g = [str(x) for x in (cl or []) if str(x) in rid_set]
+                if g:
+                    clusters.append(g)
+            if r.get("stuck") and grounded:
+                stuck_votes += 1
+            if not direction and r.get("direction"):
+                direction = str(r.get("direction"))[:400]
+            if not symbol and r.get("target_symbol"):
+                symbol = str(r.get("target_symbol"))[:120]
+            if not reason and r.get("reason"):
+                reason = str(r.get("reason"))[:300]
+        stuck = stuck_votes > nn / 2.0
+        rcc = "unsolvable" if stuck else (max(votes.items(), key=lambda kv: kv[1])[0] if votes else "semantic_logic_bug")
+        diag = {"root_cause_class": rcc, "direction": direction, "target_ids": tids,
+                "target_symbol": symbol, "target_files": tfiles, "sub_clusters": clusters,
+                "stuck": bool(stuck), "evidence_ids": tids[:20], "reason": reason}
+        self._sarp_residual_diag_cache[sha] = diag
+        self.log("diagnose_residual: cause=" + rcc + " stuck=" + str(stuck)
+                 + " targets=" + str(len(tids)))
+        return diag
+
+    def sarp_step(self, red: dict, modules: Sequence[dict], *,
+                  scope_ids: Optional[Sequence[str]] = None) -> Optional[dict]:
+        """Public hook called after each reduce in the converge / run_phase loop. No-op (returns None on
+        the first line) when SARP is off -> the loop is byte-identical. Otherwise runs the SARP
+        controller: observe distance, and on a sterile round at a non-trivial frontier, diagnose +
+        fire ONE bounded adaptation rung, then RE-MEASURE. Returns the refreshed ``red`` dict (which the
+        loop ADOPTS — updating carry/residual, and short-circuiting on ``red["accepted"]``) when a rung
+        ran, or None (no episode / terminal stuck -> the loop continues and the governor cuts once the
+        rung budget is spent)."""
+        if not self._sarp_on():
+            return None
+        try:
+            return self._sarp_observe(red or {}, list(modules or []), scope_ids=scope_ids)
+        except Exception as exc:
+            self.log("sarp_step: non-fatal error (" + str(exc)[:120] + "); deferring to governor")
+            self._sarp_state = None
+            return None
+
+    def _sarp_observe(self, red: dict, modules: Sequence[dict], *,
+                      scope_ids: Optional[Sequence[str]] = None) -> Optional[Candidate]:
+        residual = [str(x) for x in (red.get("residual_failing_ids") or [])]
+        advanced = bool(red.get("advanced"))
+        best_gp = int(self._best_gold_passed)
+        gold_total = int(red.get("gold_total") or red.get("partial_frontier_total") or 0)
+        if red.get("accepted"):
+            self._sarp_state = None
+            return None
+        # a GENUINE frontier rise closes the episode (rung pool replenishes via a fresh episode later);
+        # normal repair resumes. _sarp_total_used is NEVER decremented (the per-run ceiling, G1).
+        if advanced:
+            if self._sarp_state is not None and best_gp > int(self._sarp_state.get("open_frontier", -1)):
+                self._sarp_state = None
+            return None
+        if not residual or not self._sarp_frontier_nontrivial(best_gp, gold_total):
+            self._sarp_state = None      # trivial frontier / nothing to aim at -> let the governor cut
+            return None
+        # --- STERILE round at a NON-TRIVIAL frontier: open/continue a SARP episode ---
+        if self._sarp_state is None:
+            self._sarp_state = {"open_frontier": best_gp, "targeted": {}, "rungs_used": [],
+                                "rungs_remaining": self._sarp_env_int("APEX_OMEGA_SARP_RUNGS_PER_EPISODE", 3),
+                                "nontrivial": True}
+        st = self._sarp_state
+        st["nontrivial"] = True
+        total_budget = self._sarp_env_int("APEX_OMEGA_SARP_TOTAL_RUNG_BUDGET", 12)
+        if self._sarp_total_used >= total_budget or int(st["rungs_remaining"]) <= 0:
+            return self._sarp_terminal_stuck(residual, "rung budget exhausted")
+        sha = self.residual_set_sha(residual)
+        if sha not in self._sarp_seen_residual_shas:
+            if len(self._sarp_seen_residual_shas) >= self._sarp_env_int("APEX_OMEGA_SARP_MAX_DISTINCT_RESIDUALS", 4):
+                return self._sarp_terminal_stuck(residual, "distinct-residual cap (thrash guard)")
+            self._sarp_seen_residual_shas.add(sha)
+        excerpts = red.get("failure_excerpts") or ""
+        carry = red.get("merged_diff") or self.carry_best()
+        # RUNG 0 (read-only, NOT counted): diagnose the gap -> root cause + direction.
+        diag = self.diagnose_residual(residual, excerpts=excerpts, carry_diff=carry)
+        if diag.get("stuck"):
+            return self._sarp_terminal_stuck(residual, diag.get("reason") or "diagnosis: unsolvable")
+        rcc = str(diag.get("root_cause_class") or "semantic_logic_bug")
+        direction = str(diag.get("direction") or "")
+
+        def _spend(tag: str) -> None:
+            st["rungs_used"].append(tag)
+            st["rungs_remaining"] = int(st["rungs_remaining"]) - 1
+            self._sarp_total_used += 1
+
+        def _remeasure(new_cands) -> dict:
+            """Re-score the tree after a rung (mirrors the loop's reduce([c], carry_diff=carry)). On a
+            full-suite accept the episode closes; otherwise the loop adopts this red + continues."""
+            red2 = self.reduce_residuals([c for c in (new_cands or []) if c is not None],
+                                         carry_diff=carry, scope_ids=scope_ids)
+            if red2.get("accepted"):
+                self._sarp_state = None
+            return red2
+
+        # (c) COHERENT INTEGRATE — coupling/integration cause, once per episode.
+        if rcc == "coupling_integration" and "integrate" not in st["rungs_used"]:
+            _spend("integrate")
+            self.log("sarp: rung (c) coherent integrate (coupling cause)")
+            w = self.ralph_loop(id_base=813000, seed_carry=self.carry_best(),
+                                brief=self.integrator_brief(modules, residual))
+            return _remeasure([w] if w is not None else [])
+
+        # (b) RE-DECOMPOSE — residual concentrates in one cluster, once per residual sha.
+        clusters = diag.get("sub_clusters") or []
+        dominant = clusters[0] if len(clusters) == 1 else None
+        if dominant and sha not in self._sarp_redecompose_seen and "redecompose" not in st["rungs_used"]:
+            self._sarp_redecompose_seen.add(sha)
+            _spend("redecompose")
+            self.log("sarp: rung (b) re-decompose residual cluster (" + str(len(dominant)) + " ids)")
+            submods = [{"module": "sarp_residual_cluster", "gold_test_ids": list(dominant),
+                        "depends_on": []}]
+            cands = self.fanout_modules(submods, carry_diff=carry, id_base=731000,
+                                        extra_brief="SARP re-decompose: " + direction)
+            return _remeasure(cands)
+
+        # (a) RESIDUAL-TARGETED REPAIR — the default: re-aim at the exact ids WITH excerpts + direction.
+        cnt = int(st["targeted"].get(sha, 0))
+        if cnt < self._sarp_env_int("APEX_OMEGA_SARP_TARGETED_MAX", 2):
+            st["targeted"][sha] = cnt + 1
+            _spend("targeted")
+            tgt = [t for t in (diag.get("target_ids") or []) if t in set(residual)] or residual
+            sarp_prompt = (
+                "Make EXACTLY these STILL-failing gold tests pass — they survived prior repair rounds, "
+                "so a near-miss repeat will NOT work; fix the actual cause:\n"
+                + "\n".join(map(str, tgt[:60])) + "\n\n"
+                + ("FAILURE DETAIL (assertion tails / errors — the WHY each one fails):\n"
+                   + str(excerpts)[:3000] + "\n\n" if excerpts else "")
+                + "DIAGNOSED ROOT CAUSE: " + rcc + "\n"
+                + ("DIRECTION: " + direction + "\n" if direction else "")
+                + ("LIKELY TARGET SYMBOL: " + str(diag.get("target_symbol")) + "\n"
+                   if diag.get("target_symbol") else "")
+                + "Files partially implemented by earlier agents are PRESENT in this workspace — build "
+                "ON them, do not revert. Edit only source; do NOT touch test files. Iterate until the "
+                "listed subset is green.\n")
+            self.log("sarp: rung (a) targeted re-aim (" + rcc + ", " + str(len(tgt)) + " ids, with excerpts)")
+            c = self.repair_residual(tgt, carry_diff=carry, excerpts=excerpts, prompt=sarp_prompt,
+                                     attempt_id=714000 + self._sarp_total_used)
+            return _remeasure([c])
+
+        # (d) ESCALATE LINEAGE — targeted rounds for this sha exhausted with no rise; try a stronger
+        # model/vendor (if configured) once per episode to escape the local optimum.
+        esc_v = os.environ.get("APEX_OMEGA_SARP_ESCALATE_VENDOR") or None
+        esc_m = os.environ.get("APEX_OMEGA_SARP_ESCALATE_MODEL") or None
+        if (esc_v or esc_m) and "escalate" not in st["rungs_used"]:
+            _spend("escalate")
+            self.log("sarp: rung (d) escalate lineage (stronger model/vendor)")
+            c = self.repair_residual(residual, carry_diff=carry, excerpts=excerpts,
+                                     vendor=esc_v, model=esc_m, attempt_id=715000 + self._sarp_total_used)
+            return _remeasure([c])
+
+        # (e) ladder exhausted for this residual with no rise -> terminal stuck (cut fires next).
+        return self._sarp_terminal_stuck(residual, "ladder exhausted with no frontier rise")
 
     def repair_residual(self, residual_ids: Sequence[str], *, carry_diff: str,
                         excerpts: str = "", attempt_id: Optional[int] = None,

@@ -90,6 +90,19 @@ class RunGovernor:
         """Back-compat single-signal form (raw pass_rate plateau). Prefer ``verdict``."""
         return self.can_start() and dry_rounds < self.plateau_k_dry
 
+    def _sarp_holds(self, state: dict) -> bool:
+        """SARP ADAPT-BEFORE-CUT pre-check for the SOFT (sterile / no-progress) cut arms ONLY. When
+        SARP is enabled, the frontier is a non-trivial near-solve, the diagnosis is not 'stuck', and
+        BOTH the per-episode rung pool and the per-RUN non-resettable budget have headroom, the soft
+        cut is deferred for one more bounded adaptation rung (continue:sarp-adapt). It NEVER applies to
+        the hard cuts (nonresult-streak, harness-stall) or the agent ceiling — those stay single-sourced
+        and inviolable. Inert (False) whenever SARP is off (caller supplies sarp_enabled=False)."""
+        return (bool(state.get("sarp_enabled"))
+                and bool(state.get("sarp_frontier_nontrivial"))
+                and not bool(state.get("sarp_stuck"))
+                and int(state.get("sarp_rungs_remaining", 0)) > 0
+                and int(state.get("sarp_total_budget_remaining", 0)) > 0)
+
     def verdict(self, state: dict) -> tuple[bool, str]:
         """The SINGLE cut-losses authority. Returns ``(continue, reason)``. Evaluated each
         wave AFTER the ctx.parallel barrier. Order: hard cuts (objectively dead) first, then
@@ -110,6 +123,8 @@ class RunGovernor:
         if int(state.get("nonresult_streak", 0)) >= self.nonresult_streak_cut:
             return (False, "cut:nonresult-streak")
         if int(state.get("sterile_streak", 0)) >= self.sterile_streak_cut:
+            if self._sarp_holds(state):
+                return (True, "continue:sarp-adapt")
             return (False, "cut:sterile-diff-streak")
         # HARNESS-STALL — a wall of indeterminate (harness/scorer-failed) measurements that
         # never produced a real test outcome. A DISTINCT outcome from a genuine no-progress
@@ -125,11 +140,15 @@ class RunGovernor:
         # never force-cuts a still-progressing run (the minitorch case).
         if (int(state.get("valid_measurements_since_improvement", 0)) >= self.plateau_patience_meas
                 and float(state.get("seconds_since_frontier_improved", 0.0)) >= self.plateau_wall_seconds):
+            if self._sarp_holds(state):
+                return (True, "continue:sarp-adapt")
             return (False, "cut:no-progress")
         # LEGACY ATTEMPTS BACKSTOP — the original attempt-since-improvement no-progress floor,
         # RETAINED for back-compat (it never cuts EARLIER than before; the frontier dual-AND above
         # is the indeterminate-aware primary path).
         if int(state.get("attempts_since_improvement", 0)) >= self.plateau_patience:
+            if self._sarp_holds(state):
+                return (True, "continue:sarp-adapt")
             return (False, "cut:no-progress")
         # OPT-IN TOKEN FLOOR — only when a token budget is set (unbounded runs skip this).
         tb = self.token_budget

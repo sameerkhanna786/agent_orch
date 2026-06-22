@@ -153,6 +153,15 @@ def orchestrate(ctx):
                                brief=ctx.integrator_brief(modules, residual))
             if w is not None:
                 return w
+        # SARP: state-aware adaptive replanning (last-mile). On a sterile round at a non-trivial
+        # frontier, diagnose the residual gap + re-aim (excerpts+direction) before the governor cuts.
+        # Returns a refreshed red the loop adopts; OFF / no-episode -> None -> byte-identical.
+        sred = ctx.sarp_step(red, modules)
+        if sred is not None:
+            red = sred
+            if red["accepted"]:
+                ctx.log("SOLVED via SARP adaptive re-aim")
+                return red["candidate"]
         if red["merged_diff"]:
             carry = red["merged_diff"]
         residual = red["residual_failing_ids"]
