@@ -6176,11 +6176,11 @@ def _relocate_cli_home_for_target_runtime(
             copy_host_config=False,
             copy_host_auth=copy_auth_state,
             config_dir=Path(env["CODEX_HOME"]),
-            # FAST TOKEN GENERATION at MAX reasoning: write service_tier="fast" into the isolated
-            # codex config. The host ~/.codex/config.toml runs xhigh + service_tier="fast", proving
-            # the AI Gateway supports the fast tier — so the eval's codex agents get fast generation
-            # WITHOUT lowering reasoning effort (effort stays pinned per-exec at xhigh via -c).
-            include_service_tier=True,
+            # SERVICE TIER at MAX reasoning: by default write service_tier="fast" into the isolated
+            # codex config (fast generation WITHOUT lowering reasoning effort, which stays pinned
+            # per-exec at xhigh via -c). Env-driven: APEX_CODEX_FAST=0 omits the fast tier and uses
+            # the cheaper STANDARD tier (the spend-reduction lever). None -> _codex_fast_tier_enabled().
+            include_service_tier=None,
         )
         _harden_codex_target_runtime_home(Path(env["CODEX_HOME"]))
         public_config_files.append(Path(env["CODEX_HOME"]) / "config.toml")
@@ -6530,7 +6530,32 @@ _CODEX_FALLBACK_CONFIG_TOML = (
 _CODEX_FALLBACK_SERVICE_TIER_TOML = 'service_tier = "fast"\n'
 
 
-def _codex_fallback_config_toml(*, include_service_tier: bool = True) -> str:
+def _codex_fast_tier_enabled() -> bool:
+    """Whether codex eval agents use the 'fast' service tier (≈2x standard inference cost).
+    Default ON (back-compat / byte-identical). Set APEX_CODEX_FAST=0 to use the STANDARD tier
+    (cheaper) — the lever for reducing Codex eval spend."""
+    v = os.environ.get("APEX_CODEX_FAST", "1").strip().lower()
+    return v not in ("0", "false", "no", "off", "")
+
+
+def _strip_service_tier_lines(path: Path) -> None:
+    """Remove any ``service_tier = ...`` line from a codex config.toml. Used to honor
+    APEX_CODEX_FAST=0 when the copied host ~/.codex/config.toml pins the fast tier
+    (otherwise copy-host-config would silently re-enable fast). Best-effort."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return
+    kept = [ln for ln in text.splitlines() if not ln.strip().startswith("service_tier")]
+    try:
+        path.write_text("\n".join(kept) + ("\n" if kept else ""))
+    except OSError:
+        pass
+
+
+def _codex_fallback_config_toml(*, include_service_tier: Optional[bool] = None) -> str:
+    if include_service_tier is None:
+        include_service_tier = _codex_fast_tier_enabled()
     config = _CODEX_FALLBACK_CONFIG_TOML
     if include_service_tier:
         config += _CODEX_FALLBACK_SERVICE_TIER_TOML
@@ -6580,7 +6605,7 @@ def _seed_isolated_codex_home(
     copy_host_config: bool = True,
     copy_host_auth: bool = True,
     config_dir: Optional[Path] = None,
-    include_service_tier: bool = True,
+    include_service_tier: Optional[bool] = None,   # None -> env-driven (_codex_fast_tier_enabled)
 ) -> None:
     """Best-effort: copy the user's ~/.codex/config.toml + auth.json into the
     isolated CODEX_HOME so reasoning-effort, service-tier, and auth survive.
@@ -6589,6 +6614,12 @@ def _seed_isolated_codex_home(
     trust on the (always new) sandbox dir. Wrapped in try/except so init
     never fails on a host config oddity.
     """
+    # Resolve the service tier once (env-driven when None) so BOTH the copy-host-config path
+    # and the fallback path honor APEX_CODEX_FAST=0. The host ~/.codex/config.toml pins
+    # service_tier="fast"; copying it verbatim would silently re-enable fast, so when fast is
+    # disabled we strip that line from the copied config.
+    if include_service_tier is None:
+        include_service_tier = _codex_fast_tier_enabled()
     try:
         codex_dir = config_dir if config_dir is not None else home_path / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
@@ -6598,6 +6629,8 @@ def _seed_isolated_codex_home(
         if copy_host_config and host_config.exists():
             try:
                 shutil.copyfile(host_config, target_config)
+                if not include_service_tier:
+                    _strip_service_tier_lines(target_config)
             except OSError:
                 # Fall back to the minimal config rather than leaving codex
                 # with empty defaults.
