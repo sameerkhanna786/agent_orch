@@ -94,6 +94,15 @@ SUPPORTED_EXECUTION_MODELS = frozenset(
         "gemini-3.1-pro",
         "meta/avocado-tester",
         "meta/avocado-code-latest",
+        "meta/avocado-code-internal-0604",
+        # stable BUNDLED checkpoints (always loaded; no flaky model-api dependency)
+        "meta/avocado-code-internal-0529",
+        "meta/avocado-code-internal-0522",
+        "meta/avocado-code-internal-2.0",
+        "meta/avocado-code-flex",
+        # strongest checkpoint per the MetaCode team, but GATED (allowlist) — registered so it
+        # is a one-line flip once access is granted.
+        "meta/avocado-5.13",
     }
 )
 _CLAUDE_OPUS_EXECUTION_MODEL_ID = "claude-opus-4-8[1m]"
@@ -108,28 +117,50 @@ _MODEL_NAME_ALIASES = {
     "gemini 3.1 pro": "gemini-3.1-pro",
     "gemini_3_1_pro": "gemini-3.1-pro",
     "gemini3.1pro": "gemini-3.1-pro",
-    "avocado": "meta/avocado-tester",
+    # "avocado"/"metacode" resolve to the most powerful STABLE checkpoint available to us.
+    # avocado-5.13 is strongest per the MetaCode team but GATED (no access yet). The model-api
+    # checkpoints (0604/latest) are intermittently unavailable (vanish under load), so the alias
+    # points at the newest BUNDLED build (0529), which is always loaded. avocado-tester (4/27) is
+    # the weak April variant kept only for back-compat; do NOT use it for evals.
+    "avocado": "meta/avocado-code-internal-0529",
     "avocado-tester": "meta/avocado-tester",
     "meta/avocado-tester": "meta/avocado-tester",
     "avocado-code-latest": "meta/avocado-code-latest",
     "meta/avocado-code-latest": "meta/avocado-code-latest",
-    "metacode": "meta/avocado-code-latest",
+    "avocado-code-internal-0604": "meta/avocado-code-internal-0604",
+    "meta/avocado-code-internal-0604": "meta/avocado-code-internal-0604",
+    "avocado-code-internal-0529": "meta/avocado-code-internal-0529",
+    "meta/avocado-code-internal-0529": "meta/avocado-code-internal-0529",
+    "meta/avocado-code-internal-0522": "meta/avocado-code-internal-0522",
+    "meta/avocado-code-internal-2.0": "meta/avocado-code-internal-2.0",
+    "meta/avocado-code-flex": "meta/avocado-code-flex",
+    "avocado-5.13": "meta/avocado-5.13",
+    "meta/avocado-5.13": "meta/avocado-5.13",
+    "metacode": "meta/avocado-code-internal-0529",
 }
 _SUPPORTED_BACKEND_MODELS = {
     LLMBackend.OPENAI_API: frozenset({"gpt-5.5"}),
     LLMBackend.CLAUDE_CLI: frozenset({"opus"}),
     LLMBackend.GEMINI_CLI: frozenset({"gemini-3.1-pro"}),
     LLMBackend.CODEX_CLI: frozenset({"gpt-5.5"}),
-    LLMBackend.OPENCODE_CLI: frozenset({"meta/avocado-tester"}),
-    LLMBackend.METACODE_CLI: frozenset({"meta/avocado-code-latest"}),
+    LLMBackend.OPENCODE_CLI: frozenset(
+        {"meta/avocado-tester", "meta/avocado-code-latest", "meta/avocado-code-internal-0604",
+         "meta/avocado-code-internal-0529", "meta/avocado-code-internal-0522",
+         "meta/avocado-code-internal-2.0", "meta/avocado-code-flex", "meta/avocado-5.13"}
+    ),
+    LLMBackend.METACODE_CLI: frozenset(
+        {"meta/avocado-tester", "meta/avocado-code-latest", "meta/avocado-code-internal-0604",
+         "meta/avocado-code-internal-0529", "meta/avocado-code-internal-0522",
+         "meta/avocado-code-internal-2.0", "meta/avocado-code-flex", "meta/avocado-5.13"}
+    ),
 }
 _DEFAULT_MODEL_BY_BACKEND = {
     LLMBackend.OPENAI_API: "gpt-5.5",
     LLMBackend.CLAUDE_CLI: "opus",
     LLMBackend.GEMINI_CLI: "gemini-3.1-pro",
     LLMBackend.CODEX_CLI: "gpt-5.5",
-    LLMBackend.OPENCODE_CLI: "meta/avocado-tester",
-    LLMBackend.METACODE_CLI: "meta/avocado-code-latest",
+    LLMBackend.OPENCODE_CLI: "meta/avocado-code-internal-0529",
+    LLMBackend.METACODE_CLI: "meta/avocado-code-internal-0529",
 }
 _LLM_CONFIG_KEEP = object()
 _CLI_PERMISSION_MODES_BY_BACKEND = {

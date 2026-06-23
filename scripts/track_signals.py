@@ -31,7 +31,8 @@ LADDER = REPO / "runs" / "ladder"
 SIGNALS_LOG = LADDER / "signals_log.jsonl"
 
 ARM_LABELS = {
-    "B0_codex_1shot": "B0 vanilla 1-shot",
+    "B0_1shot": "B0 vanilla 1-shot",
+    "B0_codex_1shot": "B0 vanilla 1-shot",  # legacy label (pre backend-neutral rename)
     "baseline_v1_k8": "baseline_v1 (K=8)",
     "omega_template_k8": "template (K=8)",
     "omega_autogen_k8": "autogen (K=8)",
@@ -199,7 +200,7 @@ def render_md(cells: dict, an: dict, obs: list) -> str:
     L.append("## Solve-rate + efficiency per arm")
     L.append("| arm | solved/total | solve-rate | agents/solve | failure mix |")
     L.append("|---|---|---|---|---|")
-    for label in ["B0_codex_1shot", "baseline_v1_k8", "omega_template_k8", "omega_autogen_k8", "B2_v1_fullcap16"]:
+    for label in ["B0_1shot", "B0_codex_1shot", "baseline_v1_k8", "omega_template_k8", "omega_autogen_k8", "B2_v1_fullcap16"]:
         a = an["arms"].get(label)
         if not a:
             continue

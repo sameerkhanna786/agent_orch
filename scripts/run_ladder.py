@@ -138,7 +138,10 @@ _OMEGA_MAX = "1000"   # = the hard agent ceiling; the plateau governor is the re
 # An ARMS entry is (label, flags) or (label, flags, env_overlay). The optional 3rd element is
 # a per-cell child-env overlay (e.g. the ralph baseline's mode switch).
 ARMS = [
-    ("B0_codex_1shot",          ["--arms", "B0_single_model"]),
+    # B0 single-model 1-shot anchor. Backend-neutral: it follows the eval's --base-config backend
+    # (LADDER_BASE_CONFIG), so on a metacode/avocado sweep it is a metacode 1-shot, on codex it is a
+    # codex 1-shot — an apples-to-apples anchor for whatever model orchestration is evaluated on.
+    ("B0_1shot",                ["--arms", "B0_single_model"]),
     ("baseline_v1_k8",          ["--arms", "baseline", "--rollouts", "8"]),
     # RALPH-WIGGUM baseline: a "vanilla" CLI in a dumb iterate-until-done loop (ONE sequential
     # lineage, fed the failing tests each turn, NO scout/author/patterns) with a large budget,
@@ -519,6 +522,11 @@ def run_cell(label: str, flags: list[str], repo: str, env_overlay: dict | None =
     rundir.mkdir(parents=True, exist_ok=True)
     cmd = [VENV, "-m", "apex_omega", "eval", *flags, "--repos", repo, "--limit", "1",
            "--run-dir", str(rundir), "--cell-timeout", str(CELL_TIMEOUT)]
+    # LADDER_BASE_CONFIG overrides the eval's --base-config (e.g. a metacode/avocado backend
+    # config) so a sweep can swap the per-attempt coding agent without touching the arm defs.
+    _base_cfg = os.environ.get("LADDER_BASE_CONFIG")
+    if _base_cfg:
+        cmd += ["--base-config", _base_cfg]
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     env.setdefault("HF_DATASETS_OFFLINE", "1")

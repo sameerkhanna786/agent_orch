@@ -1,0 +1,54 @@
+{
+  "llm_configs": [
+    {
+      "backend": "metacode_cli",
+      "model": "meta/avocado-code-internal-0529",
+      "cli_timeout": 900,
+      "cli_hard_timeout_seconds": 1200,
+      "cli_strict_hard_timeout": true
+    }
+  ],
+  "rollout": {
+    "num_rollouts": 3,
+    "enable_adaptive_allocation": true,
+    "min_rollouts": 1,
+    "max_rollouts": 3,
+    "parallel_workers": 3,
+    "enable_progressive_rollout_allocation": true,
+    "max_progressive_rollout_waves": 2,
+    "enable_residual_followup": true,
+    "max_selection_followup_rounds": 1,
+    "enable_heuristic_fallback": true,
+    "enable_quick_verification": true,
+    "quick_verification_max_tests": 8,
+    "agent_mode": "adaptive",
+    "keep_worktrees": false
+  },
+  "planning": {
+    "enable_manager_planner": true,
+    "planner_llm_index": 0
+  },
+  "selection": {
+    "strategy": "multi_stage",
+    "enable_regression_pruning": true,
+    "enable_critic_reranking": true,
+    "critic_weight": 0.2
+  },
+  "benchmark": {
+    "commit0_primary_evaluation_backend": "local_pytest_json_report",
+    "commit0_official_audit_selected": false,
+    "commit0_docker_fallback_on_failure": false,
+    "commit0_docker_runtime_mode": "never",
+    "evaluation_contract": {
+      "mode": "gold_suite_visible",
+      "scoring_universe": "expected_test_ids",
+      "diagnostic_universes": ["extra_non_scored_tests", "raw_pytest_returncode"],
+      "raw_returncode_policy": "diagnostic_only_when_scoring_filtered",
+      "extra_result_policy": "diagnostic_only",
+      "baseline_timeout_policy": "attempt_anyway",
+      "environment_failure_policy": "fallback_runtime"
+    }
+  },
+  "save_trajectories": false,
+  "log_level": "INFO"
+}

@@ -114,6 +114,12 @@ class AblationArm:
     v1_overlay: Optional[dict] = None                 # deep-merge onto base ApexConfig (Mode A); None if engine-native only
     maps_to: str = ""               # §20 matrix id (A1..A11, B0..B4)
     description: str = ""
+    # A single-model 1-shot anchor (B0): instead of hardcoding a vendor, it INHERITS the eval's
+    # base-config llm_configs (the model/harness orchestration is being evaluated on), truncated to
+    # exactly ONE model. So `--base-config` is the single knob that moves the anchor alongside the
+    # orchestrated arms. An APEX_OMEGA_BASELINE_BACKEND[/_MODEL] env override can decouple the anchor
+    # (e.g. a frontier anchor while orchestrating on a cheaper model). Resolved in build_arm_config_dict.
+    single_model: bool = False
 
 
 def deep_merge(base: dict, overlay: dict) -> dict:
@@ -137,7 +143,10 @@ def build_ablation_config(arm: "AblationArm", base: Optional[AblationConfig] = N
 
 
 # v1 overlay fragments (deep-merged onto a base ApexConfig JSON for Mode A) -----
-_V1_SINGLE_VENDOR = {"llm_configs": [{"backend": "codex_cli", "model": "gpt-5.5"}]}
+# NOTE: B0 no longer pins a vendor — it inherits the base-config backend (single_model=True). The
+# old _V1_SINGLE_VENDOR codex pin was removed so the 1-shot anchor tracks whatever model/harness we
+# are currently evaluating orchestration on. _V1_VENDOR_MIX stays (the cross-vendor arms are
+# deliberately codex+claude regardless of base-config).
 _V1_FULL_CAP_16 = {"rollout": {"enable_adaptive_allocation": False, "num_rollouts": 16,
                                "min_rollouts": 16, "max_rollouts": 16}}
 _V1_ADAPTIVE_K = {"rollout": {"enable_adaptive_allocation": True, "min_rollouts": 1,
@@ -163,9 +172,12 @@ ARMS: dict[str, AblationArm] = {
         "B0_single_model", "baseline", "one strong single model, single shot",
         overrides={"allocation_default_k": 1, "allocation_adaptive_low_k": False,
                    "search_enabled": False, "vendor_pool": ("codex_cli",)},
-        v1_overlay=deep_merge(_V1_SINGLE_VENDOR, {"rollout": {"enable_adaptive_allocation": False,
-                   "num_rollouts": 1, "min_rollouts": 1, "max_rollouts": 1}}),
-        maps_to="B0", description="Frontier-model counter-anchor."),
+        v1_overlay={"rollout": {"enable_adaptive_allocation": False,
+                   "num_rollouts": 1, "min_rollouts": 1, "max_rollouts": 1}},
+        maps_to="B0", single_model=True,
+        description="Single-model 1-shot counter-anchor. Inherits the eval's base-config backend "
+                    "(the model/harness orchestration is being evaluated on), truncated to one model; "
+                    "override with APEX_OMEGA_BASELINE_BACKEND[/_MODEL] for a decoupled anchor."),
     "B2_v1_full_cap16": AblationArm(
         "B2_v1_full_cap16", "baseline", "APEX v1 as-shipped (full-cap-16, caps off) cost pathology",
         overrides={"allocation_adaptive_low_k": False, "allocation_default_k": 16},

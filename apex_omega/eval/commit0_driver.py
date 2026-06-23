@@ -88,9 +88,44 @@ def pin_gold_scoring_contract(cfg: dict) -> dict:
     return cfg
 
 
+def _single_model_llm_configs(cfg: dict) -> list:
+    """Resolve the llm_configs for a single-model 1-shot anchor arm (B0).
+
+    Precedence:
+      1. APEX_OMEGA_BASELINE_BACKEND (+ optional APEX_OMEGA_BASELINE_MODEL) — an explicit env
+         override that DECOUPLES the anchor from the orchestration backend (e.g. keep a frontier
+         Codex anchor while orchestrating on a cheaper metacode/avocado model). Missing model falls
+         back to that backend's default. cli_* tuning is carried from the base entry for consistency.
+      2. Otherwise inherit the eval's base-config llm_configs, truncated to exactly ONE model — so
+         `--base-config` is the single knob that moves the anchor alongside the orchestrated arms
+         (the model/harness orchestration is currently being evaluated on).
+    """
+    import os
+    base_first = (cfg.get("llm_configs") or [None])[0]
+    backend = os.environ.get("APEX_OMEGA_BASELINE_BACKEND")
+    if backend:
+        from ..executor.auth_env import default_model
+        model = os.environ.get("APEX_OMEGA_BASELINE_MODEL") or default_model(backend)
+        entry = {"backend": backend, "model": model}
+        if isinstance(base_first, dict):
+            for k, v in base_first.items():
+                if str(k).startswith("cli_") and k not in entry:
+                    entry[k] = v
+        return [entry]
+    if base_first is not None:
+        return [base_first]
+    return []
+
+
 def build_arm_config_dict(base: dict, arm: AblationArm, *, force_local: bool = True,
                           rollouts: Optional[int] = None) -> dict:
     cfg = deep_merge(base, arm.v1_overlay or {})
+    # B0-style single-model anchor: track the eval backend (base-config) instead of a hardcoded
+    # vendor, using exactly one model. OFF for every other arm (byte-identical).
+    if getattr(arm, "single_model", False):
+        sm = _single_model_llm_configs(cfg)
+        if sm:
+            cfg["llm_configs"] = sm
     if force_local:
         cfg = deep_merge(cfg, _LOCAL_NO_DOCKER)
     if rollouts is not None:

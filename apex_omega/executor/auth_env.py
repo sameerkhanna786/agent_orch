@@ -33,8 +33,11 @@ DEFAULT_MODELS = {
     "codex_cli": "gpt-5.5",
     "claude_cli": "opus",
     "gemini_cli": "gemini-3.1-pro",       # NOT gemini-2.5-pro (apex rejects it)
-    "opencode_cli": "meta/avocado-tester",
-    "metacode_cli": "meta/avocado-tester",
+    # Most powerful STABLE checkpoint available to us (newest BUNDLED build). NOT the model-api
+    # checkpoints (0604/latest) which vanish under load, and NOT the weak April "avocado-tester".
+    # avocado-5.13 is strongest but GATED. See orchestration_research/EVAL_BACKEND_SWITCH.md.
+    "opencode_cli": "meta/avocado-code-internal-0529",
+    "metacode_cli": "meta/avocado-code-internal-0529",
 }
 
 
