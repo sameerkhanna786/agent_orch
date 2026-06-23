@@ -39,7 +39,10 @@ def test_verdict_match_ok():
     assert "2.46.1" in detail
 
 
-def test_verdict_mismatch_raises_loud_with_repin_instruction():
+def test_verdict_mismatch_raises_loud_with_repin_instruction(monkeypatch):
+    # The operator escape-hatch (APEX_OMEGA_SKIP_PYDANTIC_CHECK=1) suppresses the loud raise; clear
+    # it so this test is deterministic regardless of ambient env (it false-failed when set).
+    monkeypatch.delenv(SKIP_PYDANTIC_CHECK_ENV, raising=False)
     with pytest.raises(RuntimeError) as exc:
         _pydantic_core_verdict("2.20.1", "2.11.7", "2.46.1", fail_loud=True)
     msg = str(exc.value)

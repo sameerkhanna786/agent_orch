@@ -71,7 +71,12 @@ def test_import_depth_rises_with_resolvable_chain():
     assert diag["import_depth"] >= 3  # pkg.a.b
 
 
-def test_suspect_plugin_addopts_flagged():
+def test_suspect_plugin_addopts_flagged(monkeypatch):
+    # Pin the "uninstalled plugin" check so the result reflects the parse/flag logic, not whatever
+    # pytest plugins happen to be installed in the venv (pytest_memray IS installed here, which made
+    # this a false-fail). Stubbing _external_importable still exercises the real _parse_addopts +
+    # _suspect_plugin_addopts path.
+    monkeypatch.setattr("apex_omega.autogen.diagnose_ast._external_importable", lambda top: False)
     repo = _mk({
         "pkg/__init__.py": "",
         "pyproject.toml": "[tool.pytest.ini_options]\naddopts = \"--memray -q\"\n",

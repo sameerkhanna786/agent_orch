@@ -207,17 +207,6 @@ def test_repair_lineage_runs_by_default():
     assert state["n"] == 2                         # base + ONE repair (default ON)
 
 
-def test_commit0_autogen_repair_iters_env_default_is_two():
-    # The as-run eval value: APEX_OMEGA_REPAIR_ITERS now defaults to "2".
-    import os
-    prior = os.environ.pop("APEX_OMEGA_REPAIR_ITERS", None)
-    try:
-        assert int(os.environ.get("APEX_OMEGA_REPAIR_ITERS", "2") or 2) == 2
-    finally:
-        if prior is not None:
-            os.environ["APEX_OMEGA_REPAIR_ITERS"] = prior
-
-
 # --------------------------------------------------------------------------- #
 # (2b) FLAG FLIP — repair excerpts ON by default (sanitized)
 # --------------------------------------------------------------------------- #

@@ -139,13 +139,15 @@ def test_per_agent_timeout_none_when_cell_unbounded():
 def test_per_agent_watchdog_excludes_and_reruns():
     # 0.2c: a hung/non-vendor agent is abandoned for SELECTION (heartbeat_timeout ->
     # infra_nonresult -> excluded, NOT a journal hit -> re-runs), without killing the cell.
-    import time as _time
+    import threading
     eng = Engine(tempfile.mkdtemp(), run_id="t")
     calls = {"n": 0}
 
+    never = threading.Event()  # never set -> worker is provably still-alive when th.join(wall) returns
+
     def slow(task):
-        calls["n"] += 1
-        _time.sleep(3)                                    # > the watchdog wall
+        calls["n"] += 1                                   # increment runs before the blocking wait
+        never.wait(timeout=60)                            # blocks >> watchdog wall; no real-clock race
         return ExecResult(ok=True, finalization_status="completed")
 
     r1 = eng.agent(ScopedTask(prompt="x", heartbeat_timeout_seconds=0.3, scoped_inputs={"k": "v"}),
