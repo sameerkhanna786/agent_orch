@@ -1,0 +1,861 @@
+{
+  "_schema": "swerebench_slice/v1",
+  "_source": "nebius/SWE-rebench",
+  "_strata": {
+    "fresh": ">= 2024-06-01",
+    "older": "< 2023-01-01"
+  },
+  "_note": "Pinned offline registry+inventory; never re-fetched at eval time. gold_ids = sorted(set(FAIL_TO_PASS)|set(PASS_TO_PASS)). The raw `requirements` is conda file:// pins kept for provenance ONLY; the runner installs from `install` + in-repo reqs_path + pip_packages.",
+  "instances": {
+    "joke2k__faker-1046": {
+      "instance_id": "joke2k__faker-1046",
+      "repo": "joke2k/faker",
+      "base_commit": "c284aa604b0fb931bdb7533714fe1ee386b8cedc",
+      "python": "3.9",
+      "install": "pip install -e .",
+      "reqs_path": [],
+      "packages": [
+        "pytest"
+      ],
+      "pip_packages": [
+        "pytest",
+        "coverage"
+      ],
+      "requirements": "coverage==7.8.0\nexceptiongroup @ file:///croot/exceptiongroup_1706031385326/work\n-e git+https://github.com/joke2k/faker.git@c284aa604b0fb931bdb7533714fe1ee386b8cedc#egg=Faker\niniconfig @ file:///home/linux1/recipes/ci/iniconfig_1610983019677/work\npackaging @ file:///croot/packaging_1734472117206/work\npluggy @ file:///croot/pluggy_1733169602837/work\npytest @ file:///croot/pytest_1738938843180/work\npython-dateutil==2.9.0.post0\nsix==1.17.0\ntext-unidecode==1.3\ntomli @ file:///opt/conda/conda-bld/tomli_1657175507142/work\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/providers/test_isbn.py b/tests/providers/test_isbn.py\nindex 4d6fab06..fe01c4aa 100644\n--- a/tests/providers/test_isbn.py\n+++ b/tests/providers/test_isbn.py\n@@ -43,8 +43,13 @@ class TestProvider(unittest.TestCase):\n     def test_reg_pub_separation(self):\n         r1 = RegistrantRule('0000000', '0000001', 1)\n         r2 = RegistrantRule('0000002', '0000003', 2)\n-        assert self.prov._registrant_publication('0000000', [r1, r2]) == ('0', '000000')\n-        assert self.prov._registrant_publication('0000002', [r1, r2]) == ('00', '00002')\n+        assert self.prov._registrant_publication('00000000', [r1, r2]) == ('0', '0000000')\n+        assert self.prov._registrant_publication('00000010', [r1, r2]) == ('0', '0000010')\n+        assert self.prov._registrant_publication('00000019', [r1, r2]) == ('0', '0000019')\n+        assert self.prov._registrant_publication('00000020', [r1, r2]) == ('00', '000020')\n+        assert self.prov._registrant_publication('00000030', [r1, r2]) == ('00', '000030')\n+        assert self.prov._registrant_publication('00000031', [r1, r2]) == ('00', '000031')\n+        assert self.prov._registrant_publication('00000039', [r1, r2]) == ('00', '000039')\n \n     def test_rule_not_found(self):\n         with pytest.raises(Exception):\n",
+      "created_at": "2019-11-09 18:31:05",
+      "stratum": "older",
+      "fail_to_pass": [
+        "tests/providers/test_isbn.py::TestProvider::test_reg_pub_separation"
+      ],
+      "pass_to_pass": [
+        "tests/providers/test_isbn.py::TestISBN10::test_check_digit_is_correct",
+        "tests/providers/test_isbn.py::TestISBN10::test_format_length",
+        "tests/providers/test_isbn.py::TestISBN13::test_check_digit_is_correct",
+        "tests/providers/test_isbn.py::TestISBN13::test_format_length",
+        "tests/providers/test_isbn.py::TestProvider::test_rule_not_found"
+      ],
+      "gold_ids": [
+        "tests/providers/test_isbn.py::TestISBN10::test_check_digit_is_correct",
+        "tests/providers/test_isbn.py::TestISBN10::test_format_length",
+        "tests/providers/test_isbn.py::TestISBN13::test_check_digit_is_correct",
+        "tests/providers/test_isbn.py::TestISBN13::test_format_length",
+        "tests/providers/test_isbn.py::TestProvider::test_reg_pub_separation",
+        "tests/providers/test_isbn.py::TestProvider::test_rule_not_found"
+      ]
+    },
+    "joke2k__faker-1368": {
+      "instance_id": "joke2k__faker-1368",
+      "repo": "joke2k/faker",
+      "base_commit": "434457ea74daf0d9c3c7380eb91af4ae34936725",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [
+        "pytest pytest-cov pytest-xdist pytest-mock pytest-asyncio"
+      ],
+      "requirements": "coverage==7.8.0\nexceptiongroup==1.2.2\nexecnet==2.1.1\n-e git+https://github.com/joke2k/faker.git@434457ea74daf0d9c3c7380eb91af4ae34936725#egg=Faker\niniconfig==2.1.0\npackaging==24.2\npluggy==1.5.0\npytest==8.3.5\npytest-asyncio==0.26.0\npytest-cov==6.0.0\npytest-mock==3.14.0\npytest-xdist==3.6.1\npython-dateutil==2.9.0.post0\nsix==1.17.0\ntext-unidecode==1.3\ntomli==2.2.1\ntyping_extensions==4.13.0\n",
+      "test_cmd": "pytest -xvs",
+      "log_parser": "parse_log_pytest_v2",
+      "test_patch": "diff --git a/tests/providers/test_lorem.py b/tests/providers/test_lorem.py\nindex 7ba59859..be45e8b5 100644\n--- a/tests/providers/test_lorem.py\n+++ b/tests/providers/test_lorem.py\n@@ -88,6 +88,10 @@ class TestLoremProvider:\n                 words = sentence.lower().replace('.', '').split()\n                 assert all(isinstance(word, str) and word in self.custom_word_list for word in words)\n \n+    def test_sentence_single_word(self, faker):\n+        word = faker.sentence(1)\n+        assert str.isupper(word[0])\n+\n     def test_paragraph_no_sentences(self, faker, num_samples):\n         for _ in range(num_samples):\n             assert faker.paragraph(0) == ''\n",
+      "created_at": "2021-01-11 22:48:55",
+      "stratum": "older",
+      "fail_to_pass": [
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraph_no_sentences",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraph_with_custom_word_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraph_with_exact_sentence_count",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraph_with_inexact_sentence_count",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraphs",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_single_word",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_text_with_custom_word_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_text_with_less_than_four_characters",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_texts"
+      ],
+      "pass_to_pass": [
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_no_words",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_with_custom_word_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_with_exact_word_count",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_with_inexact_word_count",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentences",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_word_with_custom_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_word_with_defaults",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_words_with_custom_word_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_words_with_defaults",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_words_with_unique_sampling",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_words_with_zero_nb"
+      ],
+      "gold_ids": [
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraph_no_sentences",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraph_with_custom_word_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraph_with_exact_sentence_count",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraph_with_inexact_sentence_count",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_paragraphs",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_no_words",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_single_word",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_with_custom_word_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_with_exact_word_count",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentence_with_inexact_word_count",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_sentences",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_text_with_custom_word_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_text_with_less_than_four_characters",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_texts",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_word_with_custom_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_word_with_defaults",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_words_with_custom_word_list",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_words_with_defaults",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_words_with_unique_sampling",
+        "tests/providers/test_lorem.py::TestLoremProvider::test_words_with_zero_nb"
+      ]
+    },
+    "narwhals-dev__narwhals-1014": {
+      "instance_id": "narwhals-dev__narwhals-1014",
+      "repo": "narwhals-dev/narwhals",
+      "base_commit": "cba61e154878e8b523bd02a3ff895a85db494281",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [
+        "requirements-dev.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [
+        "pytest",
+        "pytest-cov"
+      ],
+      "requirements": "attrs==25.3.0\ncfgv==3.4.0\nclick==8.1.8\ncloudpickle==3.1.1\ncovdefaults==2.3.0\ncoverage==7.8.0\ndask==2024.8.0\ndask-expr==1.1.10\ndistlib==0.3.9\nduckdb==1.2.1\nexceptiongroup==1.2.2\nfilelock==3.18.0\nfsspec==2025.3.1\nhypothesis==6.130.5\nidentify==2.6.9\nimportlib_metadata==8.6.1\niniconfig==2.1.0\njoblib==1.4.2\nlocket==1.0.0\n-e git+https://github.com/narwhals-dev/narwhals.git@cba61e154878e8b523bd02a3ff895a85db494281#egg=narwhals\nnodeenv==1.9.1\nnumpy==2.0.2\npackaging==24.2\npandas==2.2.3\npartd==1.4.2\nplatformdirs==4.3.7\npluggy==1.5.0\npolars==1.26.0\npre_commit==4.2.0\npyarrow==19.0.1\npytest==8.3.5\npytest-cov==6.0.0\npytest-env==1.1.5\npython-dateutil==2.9.0.post0\npytz==2025.2\nPyYAML==6.0.2\nscikit-learn==1.6.1\nscipy==1.13.1\nsix==1.17.0\nsortedcontainers==2.4.0\nthreadpoolctl==3.6.0\ntomli==2.2.1\ntoolz==1.0.0\ntqdm==4.67.1\ntyping_extensions==4.13.0\ntzdata==2025.2\nvirtualenv==20.29.3\nzipp==3.21.0\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/frame/to_native_test.py b/tests/frame/to_native_test.py\nnew file mode 100644\nindex 00000000..236403e2\n--- /dev/null\n+++ b/tests/frame/to_native_test.py\n@@ -0,0 +1,11 @@\n+from typing import Any\n+\n+import narwhals.stable.v1 as nw\n+\n+\n+def test_to_native(constructor_eager: Any) -> None:\n+    data = {\"a\": [1, 3, 2], \"b\": [4, 4, 6], \"z\": [7.1, 8, 9]}\n+    df_raw = constructor_eager(data)\n+    df = nw.from_native(df_raw, eager_only=True)\n+\n+    assert isinstance(df.to_native(), df_raw.__class__)\n",
+      "created_at": "2024-09-20 12:28:08",
+      "stratum": "fresh",
+      "fail_to_pass": [
+        "tests/frame/to_native_test.py::test_to_native[pandas_constructor]",
+        "tests/frame/to_native_test.py::test_to_native[pandas_nullable_constructor]",
+        "tests/frame/to_native_test.py::test_to_native[pandas_pyarrow_constructor]",
+        "tests/frame/to_native_test.py::test_to_native[polars_eager_constructor]",
+        "tests/frame/to_native_test.py::test_to_native[pyarrow_table_constructor]"
+      ],
+      "pass_to_pass": [],
+      "gold_ids": [
+        "tests/frame/to_native_test.py::test_to_native[pandas_constructor]",
+        "tests/frame/to_native_test.py::test_to_native[pandas_nullable_constructor]",
+        "tests/frame/to_native_test.py::test_to_native[pandas_pyarrow_constructor]",
+        "tests/frame/to_native_test.py::test_to_native[polars_eager_constructor]",
+        "tests/frame/to_native_test.py::test_to_native[pyarrow_table_constructor]"
+      ]
+    },
+    "narwhals-dev__narwhals-1016": {
+      "instance_id": "narwhals-dev__narwhals-1016",
+      "repo": "narwhals-dev/narwhals",
+      "base_commit": "55e71486a31c6b0713f59d6bd22dbefef9afae9c",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [
+        "requirements-dev.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [],
+      "requirements": "attrs==25.3.0\ncfgv==3.4.0\nclick==8.1.8\ncloudpickle==3.1.1\ncovdefaults==2.3.0\ncoverage==7.8.0\ndask==2024.8.0\ndask-expr==1.1.10\ndistlib==0.3.9\nduckdb==1.2.1\nexceptiongroup==1.2.2\nfilelock==3.18.0\nfsspec==2025.3.1\nhypothesis==6.130.5\nidentify==2.6.9\nimportlib_metadata==8.6.1\niniconfig==2.1.0\njoblib==1.4.2\nlocket==1.0.0\n-e git+https://github.com/narwhals-dev/narwhals.git@55e71486a31c6b0713f59d6bd22dbefef9afae9c#egg=narwhals\nnodeenv==1.9.1\nnumpy==2.0.2\npackaging==24.2\npandas==2.2.3\npartd==1.4.2\nplatformdirs==4.3.7\npluggy==1.5.0\npolars==1.26.0\npre_commit==4.2.0\npyarrow==19.0.1\npytest==8.3.5\npytest-cov==6.0.0\npytest-env==1.1.5\npython-dateutil==2.9.0.post0\npytz==2025.2\nPyYAML==6.0.2\nscikit-learn==1.6.1\nscipy==1.13.1\nsix==1.17.0\nsortedcontainers==2.4.0\nthreadpoolctl==3.6.0\ntomli==2.2.1\ntoolz==1.0.0\ntqdm==4.67.1\ntyping_extensions==4.13.0\ntzdata==2025.2\nvirtualenv==20.29.3\nzipp==3.21.0\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/series_only/to_native_test.py b/tests/series_only/to_native_test.py\nnew file mode 100644\nindex 00000000..269348ea\n--- /dev/null\n+++ b/tests/series_only/to_native_test.py\n@@ -0,0 +1,14 @@\n+from __future__ import annotations\n+\n+from typing import Any\n+\n+import narwhals.stable.v1 as nw\n+\n+data = [4, 4, 4, 1, 6, 6, 4, 4, 1, 1]\n+\n+\n+def test_to_native(constructor_eager: Any) -> None:\n+    orig_series = constructor_eager({\"a\": data})[\"a\"]\n+    nw_series = nw.from_native(constructor_eager({\"a\": data}), eager_only=True)[\"a\"]\n+    result = nw_series.to_native()\n+    assert isinstance(result, orig_series.__class__)\n",
+      "created_at": "2024-09-20 12:35:32",
+      "stratum": "fresh",
+      "fail_to_pass": [
+        "tests/series_only/to_native_test.py::test_to_native[pandas_constructor]",
+        "tests/series_only/to_native_test.py::test_to_native[pandas_nullable_constructor]",
+        "tests/series_only/to_native_test.py::test_to_native[pandas_pyarrow_constructor]",
+        "tests/series_only/to_native_test.py::test_to_native[polars_eager_constructor]",
+        "tests/series_only/to_native_test.py::test_to_native[pyarrow_table_constructor]"
+      ],
+      "pass_to_pass": [],
+      "gold_ids": [
+        "tests/series_only/to_native_test.py::test_to_native[pandas_constructor]",
+        "tests/series_only/to_native_test.py::test_to_native[pandas_nullable_constructor]",
+        "tests/series_only/to_native_test.py::test_to_native[pandas_pyarrow_constructor]",
+        "tests/series_only/to_native_test.py::test_to_native[polars_eager_constructor]",
+        "tests/series_only/to_native_test.py::test_to_native[pyarrow_table_constructor]"
+      ]
+    },
+    "narwhals-dev__narwhals-1040": {
+      "instance_id": "narwhals-dev__narwhals-1040",
+      "repo": "narwhals-dev/narwhals",
+      "base_commit": "9a51501d727c11ce486b9918dc4d6eced80bbddc",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [
+        "requirements-dev.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [
+        "pytest",
+        "pytest-cov"
+      ],
+      "requirements": "attrs==25.3.0\ncfgv==3.4.0\nclick==8.1.8\ncloudpickle==3.1.1\ncovdefaults==2.3.0\ncoverage==7.8.0\ndask==2024.8.0\ndask-expr==1.1.10\ndistlib==0.3.9\nduckdb==1.2.1\nexceptiongroup==1.2.2\nfilelock==3.18.0\nfsspec==2025.3.1\nhypothesis==6.130.5\nidentify==2.6.9\nimportlib_metadata==8.6.1\niniconfig==2.1.0\njoblib==1.4.2\nlocket==1.0.0\n-e git+https://github.com/narwhals-dev/narwhals.git@9a51501d727c11ce486b9918dc4d6eced80bbddc#egg=narwhals\nnodeenv==1.9.1\nnumpy==2.0.2\npackaging==24.2\npandas==2.2.3\npartd==1.4.2\nplatformdirs==4.3.7\npluggy==1.5.0\npolars==1.26.0\npre_commit==4.2.0\npyarrow==19.0.1\npytest==8.3.5\npytest-cov==6.0.0\npytest-env==1.1.5\npytest-randomly==3.16.0\npython-dateutil==2.9.0.post0\npytz==2025.2\nPyYAML==6.0.2\nscikit-learn==1.6.1\nscipy==1.13.1\nsix==1.17.0\nsortedcontainers==2.4.0\nthreadpoolctl==3.6.0\ntomli==2.2.1\ntoolz==1.0.0\ntqdm==4.67.1\ntyping_extensions==4.13.0\ntzdata==2025.2\nvirtualenv==20.29.3\nzipp==3.21.0\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/series_only/to_dummy_test.py b/tests/series_only/to_dummy_test.py\nindex 10d6e971..ce25dd65 100644\n--- a/tests/series_only/to_dummy_test.py\n+++ b/tests/series_only/to_dummy_test.py\n@@ -6,14 +6,15 @@ import narwhals.stable.v1 as nw\n from tests.utils import ConstructorEager\n from tests.utils import assert_equal_data\n \n-data = [1, 2, 3]\n+data = [\"x\", \"y\", \"z\"]\n+data_na = [\"x\", \"y\", None]\n \n \n @pytest.mark.parametrize(\"sep\", [\"_\", \"-\"])\n def test_to_dummies(constructor_eager: ConstructorEager, sep: str) -> None:\n     s = nw.from_native(constructor_eager({\"a\": data}), eager_only=True)[\"a\"].alias(\"a\")\n     result = s.to_dummies(separator=sep)\n-    expected = {f\"a{sep}1\": [1, 0, 0], f\"a{sep}2\": [0, 1, 0], f\"a{sep}3\": [0, 0, 1]}\n+    expected = {f\"a{sep}x\": [1, 0, 0], f\"a{sep}y\": [0, 1, 0], f\"a{sep}z\": [0, 0, 1]}\n \n     assert_equal_data(result, expected)\n \n@@ -22,6 +23,31 @@ def test_to_dummies(constructor_eager: ConstructorEager, sep: str) -> None:\n def test_to_dummies_drop_first(constructor_eager: ConstructorEager, sep: str) -> None:\n     s = nw.from_native(constructor_eager({\"a\": data}), eager_only=True)[\"a\"].alias(\"a\")\n     result = s.to_dummies(drop_first=True, separator=sep)\n-    expected = {f\"a{sep}2\": [0, 1, 0], f\"a{sep}3\": [0, 0, 1]}\n+    expected = {f\"a{sep}y\": [0, 1, 0], f\"a{sep}z\": [0, 0, 1]}\n \n     assert_equal_data(result, expected)\n+\n+\n+@pytest.mark.parametrize(\"sep\", [\"_\", \"-\"])\n+def test_to_dummies_with_nulls(constructor_eager: ConstructorEager, sep: str) -> None:\n+    if \"pandas_nullable_constructor\" not in str(constructor_eager):\n+        pytest.skip()\n+    s = nw.from_native(constructor_eager({\"a\": data_na}), eager_only=True)[\"a\"].alias(\"a\")\n+    result = s.to_dummies(separator=sep)\n+    expected = {f\"a{sep}null\": [0, 0, 1], f\"a{sep}x\": [1, 0, 0], f\"a{sep}y\": [0, 1, 0]}\n+\n+    assert_equal_data(result, expected)\n+\n+\n+@pytest.mark.parametrize(\"sep\", [\"_\", \"-\"])\n+def test_to_dummies_drop_first_na(\n+    request: pytest.FixtureRequest, constructor_eager: ConstructorEager, sep: str\n+) -> None:\n+    if \"cudf\" in str(constructor_eager):\n+        request.applymarker(pytest.mark.xfail)\n+    s = nw.from_native(constructor_eager({\"a\": data_na}), eager_only=True)[\"a\"].alias(\"a\")\n+    result = s.to_dummies(drop_first=True, separator=sep)\n+    expected = {f\"a{sep}null\": [0, 0, 1], f\"a{sep}y\": [0, 1, 0]}\n+\n+    assert_equal_data(result, expected)\n+    assert result.schema == {f\"a{sep}null\": nw.Int8, f\"a{sep}y\": nw.Int8}\n",
+      "created_at": "2024-09-21 20:55:55",
+      "stratum": "fresh",
+      "fail_to_pass": [
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_nullable_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_nullable_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_pyarrow_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_pyarrow_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[polars_eager_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[polars_eager_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pyarrow_table_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pyarrow_table_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_with_nulls[pandas_nullable_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_with_nulls[pandas_nullable_constructor-_]"
+      ],
+      "pass_to_pass": [
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_nullable_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_nullable_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_pyarrow_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_pyarrow_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[polars_eager_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[polars_eager_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pyarrow_table_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pyarrow_table_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_nullable_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_nullable_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_pyarrow_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_pyarrow_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[polars_eager_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[polars_eager_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pyarrow_table_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pyarrow_table_constructor-_]"
+      ],
+      "gold_ids": [
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_nullable_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_nullable_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_pyarrow_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pandas_pyarrow_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[polars_eager_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[polars_eager_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pyarrow_table_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies[pyarrow_table_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_nullable_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_nullable_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_pyarrow_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pandas_pyarrow_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[polars_eager_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[polars_eager_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pyarrow_table_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first[pyarrow_table_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_nullable_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_nullable_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_pyarrow_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pandas_pyarrow_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[polars_eager_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[polars_eager_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pyarrow_table_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_drop_first_na[pyarrow_table_constructor-_]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_with_nulls[pandas_nullable_constructor--]",
+        "tests/series_only/to_dummy_test.py::test_to_dummies_with_nulls[pandas_nullable_constructor-_]"
+      ]
+    },
+    "narwhals-dev__narwhals-1057": {
+      "instance_id": "narwhals-dev__narwhals-1057",
+      "repo": "narwhals-dev/narwhals",
+      "base_commit": "0e26ef657388f827f71511b160d98a8cf1828d6e",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [
+        "requirements-dev.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [],
+      "requirements": "attrs==25.3.0\ncfgv==3.4.0\nclick==8.1.8\ncloudpickle==3.1.1\ncovdefaults==2.3.0\ncoverage==7.8.0\ndask==2024.8.0\ndask-expr==1.1.10\ndistlib==0.3.9\nduckdb==1.2.1\nexceptiongroup==1.2.2\nfilelock==3.18.0\nfsspec==2025.3.1\nhypothesis==6.130.5\nidentify==2.6.9\nimportlib_metadata==8.6.1\niniconfig==2.1.0\njoblib==1.4.2\nlocket==1.0.0\n-e git+https://github.com/narwhals-dev/narwhals.git@0e26ef657388f827f71511b160d98a8cf1828d6e#egg=narwhals\nnodeenv==1.9.1\nnumpy==2.0.2\npackaging==24.2\npandas==2.2.3\npartd==1.4.2\nplatformdirs==4.3.7\npluggy==1.5.0\npolars==1.26.0\npre_commit==4.2.0\npyarrow==19.0.1\npytest==8.3.5\npytest-cov==6.0.0\npytest-env==1.1.5\npytest-randomly==3.16.0\npython-dateutil==2.9.0.post0\npytz==2025.2\nPyYAML==6.0.2\nscikit-learn==1.6.1\nscipy==1.13.1\nsix==1.17.0\nsortedcontainers==2.4.0\nthreadpoolctl==3.6.0\ntomli==2.2.1\ntoolz==1.0.0\ntqdm==4.67.1\ntyping_extensions==4.13.0\ntzdata==2025.2\nvirtualenv==20.29.3\nzipp==3.21.0\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/series_only/__iter___test.py b/tests/series_only/__iter___test.py\nnew file mode 100644\nindex 00000000..d190cd80\n--- /dev/null\n+++ b/tests/series_only/__iter___test.py\n@@ -0,0 +1,16 @@\n+from __future__ import annotations\n+\n+from collections.abc import Iterable\n+from typing import Any\n+\n+import narwhals.stable.v1 as nw\n+from tests.utils import compare_dicts\n+\n+data = [1, 2, 3]\n+\n+\n+def test_to_list(constructor_eager: Any) -> None:\n+    s = nw.from_native(constructor_eager({\"a\": data}), eager_only=True)[\"a\"]\n+\n+    assert isinstance(s, Iterable)\n+    compare_dicts({\"a\": [x for x in s]}, {\"a\": [1, 2, 3]})  # noqa: C416\n",
+      "created_at": "2024-09-24 06:56:11",
+      "stratum": "fresh",
+      "fail_to_pass": [
+        "tests/series_only/__iter___test.py::test_to_list[pandas_constructor]",
+        "tests/series_only/__iter___test.py::test_to_list[pandas_nullable_constructor]",
+        "tests/series_only/__iter___test.py::test_to_list[pandas_pyarrow_constructor]",
+        "tests/series_only/__iter___test.py::test_to_list[polars_eager_constructor]",
+        "tests/series_only/__iter___test.py::test_to_list[pyarrow_table_constructor]"
+      ],
+      "pass_to_pass": [],
+      "gold_ids": [
+        "tests/series_only/__iter___test.py::test_to_list[pandas_constructor]",
+        "tests/series_only/__iter___test.py::test_to_list[pandas_nullable_constructor]",
+        "tests/series_only/__iter___test.py::test_to_list[pandas_pyarrow_constructor]",
+        "tests/series_only/__iter___test.py::test_to_list[polars_eager_constructor]",
+        "tests/series_only/__iter___test.py::test_to_list[pyarrow_table_constructor]"
+      ]
+    },
+    "neogeny__TatSu-100": {
+      "instance_id": "neogeny__TatSu-100",
+      "repo": "neogeny/TatSu",
+      "base_commit": "617a979370cf401d80667320b3b572b535f5b07c",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [
+        "requirements-dev.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [
+        "pytest",
+        "pytest-flake8",
+        "pytest-mypy",
+        "pytest-pylint"
+      ],
+      "requirements": "astroid==3.3.9\ndill==0.3.9\nexceptiongroup==1.2.2\nfilelock==3.18.0\nflake8==7.2.0\niniconfig==2.1.0\nisort==6.0.1\nmccabe==0.7.0\nmypy==1.15.0\nmypy-extensions==1.0.0\npackaging==24.2\nplatformdirs==4.3.7\npluggy==1.5.0\npycodestyle==2.13.0\npyflakes==3.3.1\npylint==3.3.6\npytest==8.3.5\npytest-flake8==1.3.0\npytest-mypy==1.0.0\npytest-pylint==0.21.0\n-e git+https://github.com/neogeny/TatSu.git@617a979370cf401d80667320b3b572b535f5b07c#egg=TatSu\ntomli==2.2.1\ntomlkit==0.13.2\ntyping_extensions==4.13.0\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/test/buffering_test.py b/test/buffering_test.py\nindex 732d5cb..802ccf9 100644\n--- a/test/buffering_test.py\n+++ b/test/buffering_test.py\n@@ -11,6 +11,7 @@ import random\n import unittest\n from codecs import open\n \n+from tatsu import parse\n from tatsu.buffering import Buffer\n from tatsu.util import ustr\n \n@@ -80,8 +81,8 @@ class BufferingTests(unittest.TestCase):\n                 start = n + 1\n         text_len = len(self.text)\n         info = self.buf.line_info(1 + text_len)\n-        self.assertEqual(info.line, 1 + len(self.text.splitlines()))\n-        self.assertEqual(info.start, text_len)\n+        self.assertEqual(info.line, len(self.text.splitlines()) - 1)\n+        self.assertEqual(info.end, text_len)\n \n     def test_linecount(self):\n         b = Buffer('')\n@@ -93,6 +94,18 @@ class BufferingTests(unittest.TestCase):\n         b = Buffer('\\n')\n         self.assertEqual(2, b.linecount)\n \n+    @unittest.skip('not valid')\n+    def test_namechars(self):\n+        grammar = '''\n+            @@namechars :: '-'\n+            start =\n+                \"key\" ~ \";\"  |\n+                \"key-word\" ~ \";\" |\n+                \"key-word-extra\" ~ \";\"\n+                ;\n+        '''\n+        self.assertEquals(['key-word-extra', ';'], parse(grammar, 'key-word-extra;'))\n+\n \n def suite():\n     return unittest.TestLoader().loadTestsFromTestCase(BufferingTests)\ndiff --git a/test/grammar/directive_test.py b/test/grammar/directive_test.py\nindex b91e86e..530def0 100644\n--- a/test/grammar/directive_test.py\n+++ b/test/grammar/directive_test.py\n@@ -4,6 +4,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera\n import unittest\n \n import tatsu\n+from tatsu.exceptions import FailedParse\n from tatsu.util import trim\n from tatsu.codegen import codegen\n \n@@ -23,6 +24,31 @@ class DirectiveTests(unittest.TestCase):\n         code = codegen(model)\n         compile('test.py', code, EXEC)\n \n+    def test_whitespace_none_directive(self):\n+        grammars = [\n+            '''\n+                @@whitespace :: None\n+                @@nameguard :: False\n+\n+                test = {'x'}+ $;\n+            ''',\n+            '''\n+                @@whitespace :: False\n+                @@nameguard :: False\n+\n+                test = {'x'}+ $;\n+            ''',\n+        ]\n+        for grammar in grammars:\n+            model = tatsu.compile(grammar, \"test\")\n+            self.assertEquals(['x', 'x'], model.parse('xx', trace=True))\n+            try:\n+                self.assertEquals(['x', 'x'], model.parse('x x', trace=True))\n+            except FailedParse:\n+                pass\n+            else:\n+                self.fail('parsed through non-whitespace')\n+\n     def test_eol_comments_re_directive(self):\n         grammar = '''\n             @@eol_comments :: /#.*?$/\ndiff --git a/test/grammar/left_recursion_test.py b/test/grammar/left_recursion_test.py\nindex 30962c3..2d8bd25 100644\n--- a/test/grammar/left_recursion_test.py\n+++ b/test/grammar/left_recursion_test.py\n@@ -4,7 +4,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera\n import unittest\n \n from tatsu.exceptions import FailedParse\n-from tatsu.tool import compile\n+from tatsu.tool import compile, parse\n \n \n class LeftRecursionTests(unittest.TestCase):\n@@ -476,3 +476,18 @@ class LeftRecursionTests(unittest.TestCase):\n \n         ast = model.parse('a(b, c)', start='expr', trace=trace, colorize=True)\n         self.assertEqual(['a', '(', ['b', 'c'], ')'], ast)\n+\n+    def test_not_at_top_level(self):\n+        grammar = r\"\"\"\n+            identifier = /\\w+/ ;\n+\n+            type = (vector_type | leaf_type) ;\n+            vector_type = base:type '[]' ;\n+            leaf_type = id:identifier ;\n+\n+            decl = type:type name:identifier ;\n+        \"\"\"\n+        self.assertEquals(\n+            {'type': {'id': 'int'}, 'name': 'x'},\n+            parse(grammar, 'int x', start='decl').asjson()\n+        )\ndiff --git a/test/grammar/semantics_test.py b/test/grammar/semantics_test.py\nindex 7ee837f..040336f 100644\n--- a/test/grammar/semantics_test.py\n+++ b/test/grammar/semantics_test.py\n@@ -91,3 +91,19 @@ class SemanticsTests(unittest.TestCase):\n         self.assertTrue(hasattr(ast, \"b\"))\n \n         self.assertTrue(issubclass(D, (A, B, C)))\n+\n+    def test_optional_attributes(self):\n+        grammar = r\"\"\"\n+            foo::Foo = left:identifier [ ':' right:identifier ] $ ;\n+            identifier = /\\w+/ ;\n+        \"\"\"\n+\n+        grammar = compile(grammar)\n+\n+        a = grammar.parse('foo : bar', semantics=ModelBuilderSemantics())\n+        assert a.left == 'foo'\n+        assert a.right == 'bar'\n+\n+        b = grammar.parse('foo', semantics=ModelBuilderSemantics())\n+        self.assertEquals(b.left, 'foo')\n+        self.assertIsNone(b.right)\n",
+      "created_at": "2019-04-21 03:18:11",
+      "stratum": "older",
+      "fail_to_pass": [
+        "test/buffering_test.py::BufferingTests::test_line_info_consistency",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_none_directive",
+        "test/grammar/semantics_test.py::SemanticsTests::test_optional_attributes"
+      ],
+      "pass_to_pass": [
+        "test/buffering_test.py::BufferingTests::test_goto_consistency",
+        "test/buffering_test.py::BufferingTests::test_line_consistency",
+        "test/buffering_test.py::BufferingTests::test_linecount",
+        "test/buffering_test.py::BufferingTests::test_next_consisntency",
+        "test/buffering_test.py::BufferingTests::test_pos_consistency",
+        "test/grammar/directive_test.py::DirectiveTests::test_eol_comments_re_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_grammar_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_left_recursion_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_nameguard_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_parseinfo_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_no_newlines",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_calc",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_calc_indirect",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_change_start_rule",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_direct_left_recursion",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_dropped_input_bug",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_indirect_left_recursion",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_indirect_left_recursion_complex",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_indirect_left_recursion_with_cut",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_left_recursion_bug",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_left_recursion_with_right_associativity",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_nested_left_recursion",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_no_left_recursion",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_not_at_top_level",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_partial_input_bug",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_with_gather",
+        "test/grammar/semantics_test.py::SemanticsTests::test_builder_basetype_codegen",
+        "test/grammar/semantics_test.py::SemanticsTests::test_builder_semantics",
+        "test/grammar/semantics_test.py::SemanticsTests::test_builder_subclassing"
+      ],
+      "gold_ids": [
+        "test/buffering_test.py::BufferingTests::test_goto_consistency",
+        "test/buffering_test.py::BufferingTests::test_line_consistency",
+        "test/buffering_test.py::BufferingTests::test_line_info_consistency",
+        "test/buffering_test.py::BufferingTests::test_linecount",
+        "test/buffering_test.py::BufferingTests::test_next_consisntency",
+        "test/buffering_test.py::BufferingTests::test_pos_consistency",
+        "test/grammar/directive_test.py::DirectiveTests::test_eol_comments_re_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_grammar_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_left_recursion_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_nameguard_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_parseinfo_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_no_newlines",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_none_directive",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_calc",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_calc_indirect",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_change_start_rule",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_direct_left_recursion",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_dropped_input_bug",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_indirect_left_recursion",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_indirect_left_recursion_complex",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_indirect_left_recursion_with_cut",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_left_recursion_bug",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_left_recursion_with_right_associativity",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_nested_left_recursion",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_no_left_recursion",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_not_at_top_level",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_partial_input_bug",
+        "test/grammar/left_recursion_test.py::LeftRecursionTests::test_with_gather",
+        "test/grammar/semantics_test.py::SemanticsTests::test_builder_basetype_codegen",
+        "test/grammar/semantics_test.py::SemanticsTests::test_builder_semantics",
+        "test/grammar/semantics_test.py::SemanticsTests::test_builder_subclassing",
+        "test/grammar/semantics_test.py::SemanticsTests::test_optional_attributes"
+      ]
+    },
+    "neogeny__TatSu-101": {
+      "instance_id": "neogeny__TatSu-101",
+      "repo": "neogeny/TatSu",
+      "base_commit": "0b8b13530e9da7a6979aaa038b80316893e25f94",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [
+        "requirements-dev.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [
+        "pytest",
+        "pytest-flake8",
+        "pytest-mypy",
+        "pytest-pylint"
+      ],
+      "requirements": "astroid==3.3.9\ndill==0.3.9\nexceptiongroup==1.2.2\nfilelock==3.18.0\nflake8==7.2.0\niniconfig==2.1.0\nisort==6.0.1\nmccabe==0.7.0\nmypy==1.15.0\nmypy-extensions==1.0.0\npackaging==24.2\nplatformdirs==4.3.7\npluggy==1.5.0\npycodestyle==2.13.0\npyflakes==3.3.1\npylint==3.3.6\npytest==8.3.5\npytest-flake8==1.3.0\npytest-mypy==1.0.0\npytest-pylint==0.21.0\n-e git+https://github.com/neogeny/TatSu.git@0b8b13530e9da7a6979aaa038b80316893e25f94#egg=TatSu\ntomli==2.2.1\ntomlkit==0.13.2\ntyping_extensions==4.13.0\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/test/grammar/directive_test.py b/test/grammar/directive_test.py\nindex b91e86e..530def0 100644\n--- a/test/grammar/directive_test.py\n+++ b/test/grammar/directive_test.py\n@@ -4,6 +4,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera\n import unittest\n \n import tatsu\n+from tatsu.exceptions import FailedParse\n from tatsu.util import trim\n from tatsu.codegen import codegen\n \n@@ -23,6 +24,31 @@ class DirectiveTests(unittest.TestCase):\n         code = codegen(model)\n         compile('test.py', code, EXEC)\n \n+    def test_whitespace_none_directive(self):\n+        grammars = [\n+            '''\n+                @@whitespace :: None\n+                @@nameguard :: False\n+\n+                test = {'x'}+ $;\n+            ''',\n+            '''\n+                @@whitespace :: False\n+                @@nameguard :: False\n+\n+                test = {'x'}+ $;\n+            ''',\n+        ]\n+        for grammar in grammars:\n+            model = tatsu.compile(grammar, \"test\")\n+            self.assertEquals(['x', 'x'], model.parse('xx', trace=True))\n+            try:\n+                self.assertEquals(['x', 'x'], model.parse('x x', trace=True))\n+            except FailedParse:\n+                pass\n+            else:\n+                self.fail('parsed through non-whitespace')\n+\n     def test_eol_comments_re_directive(self):\n         grammar = '''\n             @@eol_comments :: /#.*?$/\n",
+      "created_at": "2019-04-21 04:44:39",
+      "stratum": "older",
+      "fail_to_pass": [
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_none_directive"
+      ],
+      "pass_to_pass": [
+        "test/grammar/directive_test.py::DirectiveTests::test_eol_comments_re_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_grammar_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_left_recursion_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_nameguard_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_parseinfo_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_no_newlines"
+      ],
+      "gold_ids": [
+        "test/grammar/directive_test.py::DirectiveTests::test_eol_comments_re_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_grammar_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_left_recursion_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_nameguard_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_parseinfo_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_directive",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_no_newlines",
+        "test/grammar/directive_test.py::DirectiveTests::test_whitespace_none_directive"
+      ]
+    },
+    "tobymao__sqlglot-292": {
+      "instance_id": "tobymao__sqlglot-292",
+      "repo": "tobymao/sqlglot",
+      "base_commit": "18bb1a35df9e902218b8fca5be80df78ff39ae8c",
+      "python": "3.9",
+      "install": "pip install -e .",
+      "reqs_path": [
+        "requirements.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [
+        "pylint",
+        "black",
+        "pytest"
+      ],
+      "requirements": "astroid==3.3.9\nblack==25.1.0\nclick==8.1.8\ndill==0.3.9\nduckdb==1.2.1\nexceptiongroup==1.2.2\niniconfig==2.1.0\nisort==6.0.1\nmccabe==0.7.0\nmypy-extensions==1.0.0\nnumpy==2.0.2\npackaging==24.2\npandas==2.2.3\npathspec==0.12.1\nplatformdirs==4.3.7\npluggy==1.5.0\npylint==3.3.6\npytest==8.3.5\npython-dateutil==2.9.0.post0\npytz==2025.2\nsix==1.17.0\n-e git+https://github.com/tobymao/sqlglot.git@18bb1a35df9e902218b8fca5be80df78ff39ae8c#egg=sqlglot\ntomli==2.2.1\ntomlkit==0.13.2\ntyping_extensions==4.13.0\ntzdata==2025.2\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/test_dialects.py b/tests/test_dialects.py\nindex a8013dc1..84bb09b8 100644\n--- a/tests/test_dialects.py\n+++ b/tests/test_dialects.py\n@@ -1436,6 +1436,12 @@ class TestDialects(unittest.TestCase):\n             read=\"spark\",\n             write=\"presto\",\n         )\n+        self.validate(\n+            \"CREATE TABLE x USING ICEBERG PARTITIONED BY (MONTHS(y)) LOCATION 's3://z'\",\n+            \"CREATE TABLE x USING ICEBERG PARTITIONED BY (MONTHS(y)) LOCATION 's3://z'\",\n+            read=\"spark\",\n+            write=\"spark\",\n+        )\n         self.validate(\n             \"CREATE TABLE test STORED AS PARQUET AS SELECT 1\",\n             \"CREATE TABLE test WITH (FORMAT = 'PARQUET') AS SELECT 1\",\n",
+      "created_at": "2022-08-04 16:31:26",
+      "stratum": "older",
+      "fail_to_pass": [
+        "tests/test_dialects.py::TestDialects::test_spark"
+      ],
+      "pass_to_pass": [
+        "tests/test_dialects.py::TestDialects::test_bigquery",
+        "tests/test_dialects.py::TestDialects::test_duckdb",
+        "tests/test_dialects.py::TestDialects::test_hive",
+        "tests/test_dialects.py::TestDialects::test_mysql",
+        "tests/test_dialects.py::TestDialects::test_oracle",
+        "tests/test_dialects.py::TestDialects::test_postgres",
+        "tests/test_dialects.py::TestDialects::test_presto",
+        "tests/test_dialects.py::TestDialects::test_snowflake",
+        "tests/test_dialects.py::TestDialects::test_sqlite",
+        "tests/test_dialects.py::TestDialects::test_starrocks",
+        "tests/test_dialects.py::TestDialects::test_tableau",
+        "tests/test_dialects.py::TestDialects::test_trino"
+      ],
+      "gold_ids": [
+        "tests/test_dialects.py::TestDialects::test_bigquery",
+        "tests/test_dialects.py::TestDialects::test_duckdb",
+        "tests/test_dialects.py::TestDialects::test_hive",
+        "tests/test_dialects.py::TestDialects::test_mysql",
+        "tests/test_dialects.py::TestDialects::test_oracle",
+        "tests/test_dialects.py::TestDialects::test_postgres",
+        "tests/test_dialects.py::TestDialects::test_presto",
+        "tests/test_dialects.py::TestDialects::test_snowflake",
+        "tests/test_dialects.py::TestDialects::test_spark",
+        "tests/test_dialects.py::TestDialects::test_sqlite",
+        "tests/test_dialects.py::TestDialects::test_starrocks",
+        "tests/test_dialects.py::TestDialects::test_tableau",
+        "tests/test_dialects.py::TestDialects::test_trino"
+      ]
+    },
+    "tobymao__sqlglot-3605": {
+      "instance_id": "tobymao__sqlglot-3605",
+      "repo": "tobymao/sqlglot",
+      "base_commit": "ff55ec1ca8c259f3c304aa7f6039c033f1fe728c",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [
+        "requirements/base.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [
+        "pytest pytest-cov pytest-xdist pytest-mock pytest-asyncio",
+        "pytest"
+      ],
+      "requirements": "cfgv==3.4.0\ncoverage==7.8.0\ndistlib==0.3.9\nduckdb==1.2.1\nexceptiongroup==1.2.2\nexecnet==2.1.1\nfilelock==3.18.0\nidentify==2.6.9\niniconfig==2.1.0\nJinja2==3.1.6\nMarkupSafe==3.0.2\nmaturin==1.8.3\nmypy==1.15.0\nmypy-extensions==1.0.0\nnodeenv==1.9.1\nnumpy==2.0.2\npackaging==24.2\npandas==2.2.3\npandas-stubs==2.2.2.240807\npdoc==15.0.1\nplatformdirs==4.3.7\npluggy==1.5.0\npre_commit==4.2.0\nPygments==2.19.1\npytest==8.3.5\npytest-asyncio==0.26.0\npytest-cov==6.0.0\npytest-mock==3.14.0\npytest-xdist==3.6.1\npython-dateutil==2.9.0.post0\npytz==2025.2\nPyYAML==6.0.2\nruff==0.4.3\nsix==1.17.0\n-e git+https://github.com/tobymao/sqlglot.git@ff55ec1ca8c259f3c304aa7f6039c033f1fe728c#egg=sqlglot\ntomli==2.2.1\ntypes-python-dateutil==2.9.0.20241206\ntypes-pytz==2025.2.0.20250326\ntyping_extensions==4.13.0\ntzdata==2025.2\nvirtualenv==20.29.3\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/dialects/test_snowflake.py b/tests/dialects/test_snowflake.py\nindex ba857191..9d9371db 100644\n--- a/tests/dialects/test_snowflake.py\n+++ b/tests/dialects/test_snowflake.py\n@@ -1934,6 +1934,9 @@ STORAGE_ALLOWED_LOCATIONS=('s3://mybucket1/path1/', 's3://mybucket2/path2/')\"\"\",\n         self.validate_identity(\n             \"\"\"COPY INTO mytable (col1, col2) FROM 's3://mybucket/data/files' STORAGE_INTEGRATION = \"storage\" ENCRYPTION = (TYPE='NONE' MASTER_KEY='key') FILES = ('file1', 'file2') PATTERN = 'pattern' FILE_FORMAT = (FORMAT_NAME=my_csv_format NULL_IF=('')) PARSE_HEADER = TRUE\"\"\"\n         )\n+        self.validate_identity(\n+            \"\"\"COPY INTO @my_stage/result/data FROM (SELECT * FROM orderstiny) FILE_FORMAT = (TYPE='csv')\"\"\"\n+        )\n         self.validate_all(\n             \"\"\"COPY INTO 's3://example/data.csv'\n     FROM EXTRA.EXAMPLE.TABLE\ndiff --git a/tests/test_build.py b/tests/test_build.py\nindex 150bb42e..523dcc0a 100644\n--- a/tests/test_build.py\n+++ b/tests/test_build.py\n@@ -67,16 +67,17 @@ class TestBuild(unittest.TestCase):\n             (lambda: 1 + x * 2 + 3, \"1 + (x * 2) + 3\"),\n             (lambda: x * 1 * 2 + 3, \"(x * 1 * 2) + 3\"),\n             (lambda: 1 + (x * 2) / 3, \"1 + ((x * 2) / 3)\"),\n-            (lambda: x & \"y\", \"x AND 'y'\"),\n-            (lambda: x | \"y\", \"x OR 'y'\"),\n+            (lambda: x & \"'y'\", \"x AND 'y'\"),\n+            (lambda: x | \"'y'\", \"x OR 'y'\"),\n             (lambda: -x, \"-x\"),\n             (lambda: ~x, \"NOT x\"),\n             (lambda: x[1], \"x[1]\"),\n             (lambda: x[1, 2], \"x[1, 2]\"),\n             (lambda: x[\"y\"] + 1, \"x['y'] + 1\"),\n-            (lambda: x.like(\"y\"), \"x LIKE 'y'\"),\n-            (lambda: x.ilike(\"y\"), \"x ILIKE 'y'\"),\n-            (lambda: x.rlike(\"y\"), \"REGEXP_LIKE(x, 'y')\"),\n+            (lambda: x.like(\"y\"), \"x LIKE y\"),\n+            (lambda: x.like(\"'y'\"), \"x LIKE 'y'\"),\n+            (lambda: x.ilike(\"'y'\"), \"x ILIKE 'y'\"),\n+            (lambda: x.rlike(\"'y'\"), \"REGEXP_LIKE(x, 'y')\"),\n             (\n                 lambda: case().when(\"x = 1\", \"x\").else_(\"bar\"),\n                 \"CASE WHEN x = 1 THEN x ELSE bar END\",\n",
+      "created_at": "2024-06-05 19:52:07",
+      "stratum": "fresh",
+      "fail_to_pass": [
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_copy",
+        "tests/test_build.py::TestBuild::test_build"
+      ],
+      "pass_to_pass": [
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_alter_set_unset",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_ddl",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_describe_table",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_flatten",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_historical_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_match_recognize",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_minus",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_null_treatment",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_parse_like_any",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_querying_semi_structured_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_replace",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_substr",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_sample",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_semi_structured_types",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_columns",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_imported_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_objects",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_primary_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_schemas",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_sequences",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_tables",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_unique_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_users",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_views",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_snowflake",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_staged_files",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_storage_integration",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_stored_procedures",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_swap",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_table_literal",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_timestamps",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_try_cast",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_user_defined_functions",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_values"
+      ],
+      "gold_ids": [
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_alter_set_unset",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_copy",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_ddl",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_describe_table",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_flatten",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_historical_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_match_recognize",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_minus",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_null_treatment",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_parse_like_any",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_querying_semi_structured_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_replace",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_substr",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_sample",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_semi_structured_types",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_columns",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_imported_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_objects",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_primary_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_schemas",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_sequences",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_tables",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_unique_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_users",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_views",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_snowflake",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_staged_files",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_storage_integration",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_stored_procedures",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_swap",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_table_literal",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_timestamps",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_try_cast",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_user_defined_functions",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_values",
+        "tests/test_build.py::TestBuild::test_build"
+      ]
+    },
+    "tobymao__sqlglot-3620": {
+      "instance_id": "tobymao__sqlglot-3620",
+      "repo": "tobymao/sqlglot",
+      "base_commit": "5396a8e6ea29876c824b741c2812ad15f4768e4c",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [
+        "requirements/base.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [
+        "pytest pytest-cov pytest-xdist pytest-mock pytest-asyncio"
+      ],
+      "requirements": "cfgv==3.4.0\ncoverage==7.8.0\ndistlib==0.3.9\nduckdb==1.2.1\nexceptiongroup==1.2.2\nexecnet==2.1.1\nfilelock==3.18.0\nidentify==2.6.9\niniconfig==2.1.0\nJinja2==3.1.6\nMarkupSafe==3.0.2\nmaturin==1.8.3\nmypy==1.15.0\nmypy-extensions==1.0.0\nnodeenv==1.9.1\nnumpy==2.0.2\npackaging==24.2\npandas==2.2.3\npandas-stubs==2.2.2.240807\npdoc==15.0.1\nplatformdirs==4.3.7\npluggy==1.5.0\npre_commit==4.2.0\nPygments==2.19.1\npytest==8.3.5\npytest-asyncio==0.26.0\npytest-cov==6.0.0\npytest-mock==3.14.0\npytest-xdist==3.6.1\npython-dateutil==2.9.0.post0\npytz==2025.2\nPyYAML==6.0.2\nruff==0.4.3\nsix==1.17.0\n-e git+https://github.com/tobymao/sqlglot.git@5396a8e6ea29876c824b741c2812ad15f4768e4c#egg=sqlglot\ntomli==2.2.1\ntypes-python-dateutil==2.9.0.20241206\ntypes-pytz==2025.2.0.20250326\ntyping_extensions==4.13.0\ntzdata==2025.2\nvirtualenv==20.29.3\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/dialects/test_snowflake.py b/tests/dialects/test_snowflake.py\nindex 9d9371db..e5bf4f27 100644\n--- a/tests/dialects/test_snowflake.py\n+++ b/tests/dialects/test_snowflake.py\n@@ -1196,16 +1196,16 @@ WHERE\n         for constraint_prefix in (\"WITH \", \"\"):\n             with self.subTest(f\"Constraint prefix: {constraint_prefix}\"):\n                 self.validate_identity(\n-                    f\"CREATE TABLE t (id INT {constraint_prefix}MASKING POLICY p)\",\n-                    \"CREATE TABLE t (id INT MASKING POLICY p)\",\n+                    f\"CREATE TABLE t (id INT {constraint_prefix}MASKING POLICY p.q.r)\",\n+                    \"CREATE TABLE t (id INT MASKING POLICY p.q.r)\",\n                 )\n                 self.validate_identity(\n                     f\"CREATE TABLE t (id INT {constraint_prefix}MASKING POLICY p USING (c1, c2, c3))\",\n                     \"CREATE TABLE t (id INT MASKING POLICY p USING (c1, c2, c3))\",\n                 )\n                 self.validate_identity(\n-                    f\"CREATE TABLE t (id INT {constraint_prefix}PROJECTION POLICY p)\",\n-                    \"CREATE TABLE t (id INT PROJECTION POLICY p)\",\n+                    f\"CREATE TABLE t (id INT {constraint_prefix}PROJECTION POLICY p.q.r)\",\n+                    \"CREATE TABLE t (id INT PROJECTION POLICY p.q.r)\",\n                 )\n                 self.validate_identity(\n                     f\"CREATE TABLE t (id INT {constraint_prefix}TAG (key1='value_1', key2='value_2'))\",\n",
+      "created_at": "2024-06-10 13:50:19",
+      "stratum": "fresh",
+      "fail_to_pass": [
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_ddl"
+      ],
+      "pass_to_pass": [
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_alter_set_unset",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_copy",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_describe_table",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_flatten",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_historical_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_match_recognize",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_minus",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_null_treatment",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_parse_like_any",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_querying_semi_structured_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_replace",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_substr",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_sample",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_semi_structured_types",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_columns",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_imported_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_objects",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_primary_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_schemas",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_sequences",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_tables",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_unique_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_users",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_views",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_snowflake",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_staged_files",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_storage_integration",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_stored_procedures",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_swap",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_table_literal",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_timestamps",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_try_cast",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_user_defined_functions",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_values"
+      ],
+      "gold_ids": [
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_alter_set_unset",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_copy",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_ddl",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_describe_table",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_flatten",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_historical_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_match_recognize",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_minus",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_null_treatment",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_parse_like_any",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_querying_semi_structured_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_replace",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_substr",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_sample",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_semi_structured_types",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_columns",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_imported_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_objects",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_primary_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_schemas",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_sequences",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_tables",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_unique_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_users",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_views",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_snowflake",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_staged_files",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_storage_integration",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_stored_procedures",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_swap",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_table_literal",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_timestamps",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_try_cast",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_user_defined_functions",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_values"
+      ]
+    },
+    "tobymao__sqlglot-3627": {
+      "instance_id": "tobymao__sqlglot-3627",
+      "repo": "tobymao/sqlglot",
+      "base_commit": "ee9b01d5631f8f0942b61dfaf0632ae0ac2543bb",
+      "python": "3.9",
+      "install": "pip install -e .[dev]",
+      "reqs_path": [],
+      "packages": [
+        "pytest"
+      ],
+      "pip_packages": [
+        "pytest"
+      ],
+      "requirements": "cfgv==3.4.0\ndistlib==0.3.9\nduckdb==1.2.1\nexceptiongroup @ file:///croot/exceptiongroup_1706031385326/work\nfilelock==3.18.0\nidentify==2.6.9\niniconfig @ file:///home/linux1/recipes/ci/iniconfig_1610983019677/work\nJinja2==3.1.6\nMarkupSafe==3.0.2\nmaturin==1.8.3\nmypy==1.15.0\nmypy-extensions==1.0.0\nnodeenv==1.9.1\nnumpy==2.0.2\npackaging @ file:///croot/packaging_1734472117206/work\npandas==2.2.3\npandas-stubs==2.2.2.240807\npdoc==15.0.1\nplatformdirs==4.3.7\npluggy @ file:///croot/pluggy_1733169602837/work\npre_commit==4.2.0\nPygments==2.19.1\npytest @ file:///croot/pytest_1738938843180/work\npython-dateutil==2.9.0.post0\npytz==2025.2\nPyYAML==6.0.2\nruff==0.4.3\nsix==1.17.0\n-e git+https://github.com/tobymao/sqlglot.git@ee9b01d5631f8f0942b61dfaf0632ae0ac2543bb#egg=sqlglot\ntomli @ file:///opt/conda/conda-bld/tomli_1657175507142/work\ntypes-python-dateutil==2.9.0.20241206\ntypes-pytz==2025.2.0.20250326\ntyping_extensions==4.13.0\ntzdata==2025.2\nvirtualenv==20.29.3\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/dialects/test_snowflake.py b/tests/dialects/test_snowflake.py\nindex e5bf4f27..12864369 100644\n--- a/tests/dialects/test_snowflake.py\n+++ b/tests/dialects/test_snowflake.py\n@@ -125,6 +125,10 @@ WHERE\n             \"SELECT a:from::STRING, a:from || ' test' \",\n             \"SELECT CAST(GET_PATH(a, 'from') AS TEXT), GET_PATH(a, 'from') || ' test'\",\n         )\n+        self.validate_identity(\n+            \"SELECT a:select\",\n+            \"SELECT GET_PATH(a, 'select')\",\n+        )\n         self.validate_identity(\"x:from\", \"GET_PATH(x, 'from')\")\n         self.validate_identity(\n             \"value:values::string::int\",\n",
+      "created_at": "2024-06-11 13:07:42",
+      "stratum": "fresh",
+      "fail_to_pass": [
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_snowflake"
+      ],
+      "pass_to_pass": [
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_alter_set_unset",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_copy",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_ddl",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_describe_table",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_flatten",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_historical_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_match_recognize",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_minus",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_null_treatment",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_parse_like_any",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_querying_semi_structured_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_replace",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_substr",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_sample",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_semi_structured_types",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_columns",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_imported_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_objects",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_primary_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_schemas",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_sequences",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_tables",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_unique_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_users",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_views",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_staged_files",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_storage_integration",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_stored_procedures",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_swap",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_table_literal",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_timestamps",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_try_cast",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_user_defined_functions",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_values"
+      ],
+      "gold_ids": [
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_alter_set_unset",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_copy",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_ddl",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_describe_table",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_flatten",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_historical_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_match_recognize",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_minus",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_null_treatment",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_parse_like_any",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_querying_semi_structured_data",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_replace",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_regexp_substr",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_sample",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_semi_structured_types",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_columns",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_imported_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_objects",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_primary_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_schemas",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_sequences",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_tables",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_unique_keys",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_users",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_show_views",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_snowflake",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_staged_files",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_storage_integration",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_stored_procedures",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_swap",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_table_literal",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_timestamps",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_try_cast",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_user_defined_functions",
+        "tests/dialects/test_snowflake.py::TestSnowflake::test_values"
+      ]
+    },
+    "tobymao__sqlglot-428": {
+      "instance_id": "tobymao__sqlglot-428",
+      "repo": "tobymao/sqlglot",
+      "base_commit": "b9648bf0f322599062cffb9fbbf250800ac52480",
+      "python": "3.9",
+      "install": "pip install -e .",
+      "reqs_path": [
+        "requirements.txt"
+      ],
+      "packages": [
+        "requirements.txt"
+      ],
+      "pip_packages": [
+        "autoflake",
+        "isort",
+        "black",
+        "pytest"
+      ],
+      "requirements": "autoflake==2.3.1\nblack==25.1.0\nclick==8.1.8\nduckdb==1.2.1\nexceptiongroup==1.2.2\niniconfig==2.1.0\nisort==6.0.1\nmypy-extensions==1.0.0\nnumpy==2.0.2\npackaging==24.2\npandas==2.2.3\npathspec==0.12.1\nplatformdirs==4.3.7\npluggy==1.5.0\npyflakes==3.3.1\npytest==8.3.5\npython-dateutil==2.9.0.post0\npytz==2025.2\nsix==1.17.0\n-e git+https://github.com/tobymao/sqlglot.git@b9648bf0f322599062cffb9fbbf250800ac52480#egg=sqlglot\ntomli==2.2.1\ntyping_extensions==4.13.0\ntzdata==2025.2\n",
+      "test_cmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning",
+      "log_parser": "parse_log_pytest",
+      "test_patch": "diff --git a/tests/dialects/test_dialect.py b/tests/dialects/test_dialect.py\nindex 39935659..9d7df238 100644\n--- a/tests/dialects/test_dialect.py\n+++ b/tests/dialects/test_dialect.py\n@@ -164,6 +164,12 @@ class TestDialect(Validator):\n                 \"starrocks\": \"CAST(a AS DOUBLE)\",\n             },\n         )\n+        self.validate_all(\n+            \"CAST('1 DAY' AS INTERVAL)\",\n+            write={\n+                \"postgres\": \"CAST('1 DAY' AS INTERVAL)\",\n+            },\n+        )\n         self.validate_all(\n             \"CAST(a AS TIMESTAMP)\", write={\"starrocks\": \"CAST(a AS DATETIME)\"}\n         )\n",
+      "created_at": "2022-09-13 18:42:00",
+      "stratum": "older",
+      "fail_to_pass": [
+        "tests/dialects/test_dialect.py::TestDialect::test_cast"
+      ],
+      "pass_to_pass": [
+        "tests/dialects/test_dialect.py::TestDialect::test_array",
+        "tests/dialects/test_dialect.py::TestDialect::test_cross_join",
+        "tests/dialects/test_dialect.py::TestDialect::test_enum",
+        "tests/dialects/test_dialect.py::TestDialect::test_json",
+        "tests/dialects/test_dialect.py::TestDialect::test_operators",
+        "tests/dialects/test_dialect.py::TestDialect::test_order_by",
+        "tests/dialects/test_dialect.py::TestDialect::test_set_operators",
+        "tests/dialects/test_dialect.py::TestDialect::test_time"
+      ],
+      "gold_ids": [
+        "tests/dialects/test_dialect.py::TestDialect::test_array",
+        "tests/dialects/test_dialect.py::TestDialect::test_cast",
+        "tests/dialects/test_dialect.py::TestDialect::test_cross_join",
+        "tests/dialects/test_dialect.py::TestDialect::test_enum",
+        "tests/dialects/test_dialect.py::TestDialect::test_json",
+        "tests/dialects/test_dialect.py::TestDialect::test_operators",
+        "tests/dialects/test_dialect.py::TestDialect::test_order_by",
+        "tests/dialects/test_dialect.py::TestDialect::test_set_operators",
+        "tests/dialects/test_dialect.py::TestDialect::test_time"
+      ]
+    }
+  }
+}

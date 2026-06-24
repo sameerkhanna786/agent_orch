@@ -146,16 +146,31 @@ def cmd_eval(args: argparse.Namespace) -> int:
     from apex_omega.eval import Commit0EvalDriver, load_base_config, registry
     from apex_omega.ablation import get_arm
 
+    import os as _os
+    _benchmark = (_os.environ.get("APEX_OMEGA_BENCHMARK") or "commit0").strip().lower()
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
-    if args.repos:
-        repos = [r.strip() for r in args.repos.split(",") if r.strip()]
+    if _benchmark == "swerebench":
+        # SWE-rebench: --repos carries instance-ids resolved from the pinned slice
+        # registry. Default (commit0) is byte-identical.
+        from apex_omega.eval import swerebench_registry as _swe_registry
+        if args.repos:
+            repos = [r.strip() for r in args.repos.split(",") if r.strip()]
+        else:
+            repos = _swe_registry.local_runnable_targets()
+        for a in arms:
+            get_arm(a)
+        for r in repos:
+            _swe_registry.get(r)
     else:
-        repos = registry.local_runnable_targets() if args.local_only else list(registry.TARGET_NAMES)
-    # validate
-    for a in arms:
-        get_arm(a)
-    for r in repos:
-        registry.get(r)
+        if args.repos:
+            repos = [r.strip() for r in args.repos.split(",") if r.strip()]
+        else:
+            repos = registry.local_runnable_targets() if args.local_only else list(registry.TARGET_NAMES)
+        # validate
+        for a in arms:
+            get_arm(a)
+        for r in repos:
+            registry.get(r)
     base = load_base_config(args.base_config)
     budget = Budget(total=args.budget) if args.budget else Budget()
     driver = Commit0EvalDriver(args.run_dir, base, budget=budget, agent_mode=args.agent_mode,

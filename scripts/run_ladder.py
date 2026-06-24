@@ -271,12 +271,26 @@ ARMS = [
                        "--autogen-max-agents", _OMEGA_MAX],
                       {"APEX_OMEGA_ORCHESTRATION": "ralph", "APEX_OMEGA_REPAIR_ITERS": "200"}),
 ]
-# Default 4-repo comparison set. LADDER_REPOS (comma-separated commit0 target names) overrides it
-# for a custom sweep (e.g. a 12-15 repo breadth run); see apex_omega/eval/registry TARGET_NAMES.
-REPOS = (
-    [r.strip() for r in os.environ["LADDER_REPOS"].split(",") if r.strip()]
-    if os.environ.get("LADDER_REPOS") else ["voluptuous", "jinja", "mimesis", "pydantic"]
-)
+# LADDER_BENCHMARK selects which benchmark this ladder drives: 'commit0' (default,
+# byte-identical) or 'swerebench'. For swerebench, REPOS resolves from the pinned
+# slice instance-ids (LADDER_REPOS-overridable) and each child gets
+# APEX_OMEGA_BENCHMARK=swerebench (see run_cell's child env below).
+LADDER_BENCHMARK = (os.environ.get("LADDER_BENCHMARK") or "commit0").strip().lower()
+
+
+def _default_repos() -> list[str]:
+    if os.environ.get("LADDER_REPOS"):
+        return [r.strip() for r in os.environ["LADDER_REPOS"].split(",") if r.strip()]
+    if LADDER_BENCHMARK == "swerebench":
+        # Resolve the curated instance-ids from the pinned slice (never re-fetched).
+        from apex_omega.eval import swerebench_registry as _swe_registry
+        return _swe_registry.local_runnable_targets()
+    return ["voluptuous", "jinja", "mimesis", "pydantic"]
+
+
+# Default 4-repo comparison set. LADDER_REPOS (comma-separated commit0 target names,
+# or swerebench instance-ids when LADDER_BENCHMARK=swerebench) overrides it.
+REPOS = _default_repos()
 # Each EXTRA cell may carry an env overlay (4th element) merged into the child env.
 # (The gold-test design-contract A/B arm was removed: the contract is gone from the evaluated
 # path entirely — the agent gets only the commit0 prompt + gold tests — so there is nothing to
@@ -542,6 +556,11 @@ def run_cell(label: str, flags: list[str], repo: str, env_overlay: dict | None =
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     env.setdefault("HF_DATASETS_OFFLINE", "1")
     env.setdefault("HF_HUB_OFFLINE", "1")
+    # BENCHMARK selector: when running the swerebench ladder, every child eval gets
+    # APEX_OMEGA_BENCHMARK=swerebench so the driver routes to the swerebench runner.
+    # Default ('commit0') leaves the commit0 path byte-identical (selector unset).
+    if LADDER_BENCHMARK == "swerebench":
+        env["APEX_OMEGA_BENCHMARK"] = "swerebench"
     # 0-token blocker fix (2026-06-17, validated voluptuous 1/1): the rollout codex was
     # double-sandboxed (outer sandbox-exec read-jail -> "os error 2" ENOENT) sitting on top of
     # the Meta codex launcher's own seatbelt ("os error 1" EPERM, in-process app-server) -> every

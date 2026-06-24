@@ -63,14 +63,27 @@ def load_base_config(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _active_benchmark() -> str:
+    """The selected benchmark for this process: 'commit0' (default) or 'swerebench'.
+
+    Gated by ``APEX_OMEGA_BENCHMARK``; when unset the commit0 path is byte-identical."""
+    return (os.environ.get("APEX_OMEGA_BENCHMARK") or "commit0").strip().lower()
+
+
 def pin_gold_scoring_contract(cfg: dict) -> dict:
-    """Pin the commit0 GOLD evaluation contract onto a config dict and ASSERT the
-    expected-id-scoring gate is satisfied. This guarantees every arm (v1 baselines +
-    autogen) scores by exact gold expected-test-id match and can NEVER fall through to
-    the ``pytest_summary`` visible-suite acceptance path (which would accept a green raw
-    suite without verifying any gold-id match). An empty/failed expected-id inventory
-    then becomes a HARNESS FAILURE (indeterminate, re-run), not a silent false solve.
-    Raises if, after pinning, the gate is still not satisfied (mis-merged config)."""
+    """Pin the GOLD evaluation contract onto a config dict and ASSERT the
+    expected-id-scoring gate is satisfied (BENCHMARK-AWARE).
+
+    For the COMMIT0 path (default) this pins v1's commit0 gold contract and asserts
+    expected-test-id scoring is required so no arm can fall through to the
+    ``pytest_summary`` visible-suite acceptance path. For the SWE-REBENCH path the
+    self-contained ``swerebench_runner`` owns acceptance (real pytest-json-report
+    over the pinned gold node-ids, ``scoring_source='commit0_test_ids'`` set ONLY on
+    a real run), and there is NO commit0 evaluation-contract config to pin — so this
+    is a NO-OP for swerebench (pinning the commit0 contract there would be meaningless
+    and could mis-shape the config). The commit0 default branch is unchanged."""
+    if _active_benchmark() == "swerebench":
+        return cfg
     from apex.core.config import ApexConfig
     from apex.evaluation.commit0_benchmark import (
         COMMIT0_GOLD_EVALUATION_CONTRACT,
@@ -184,7 +197,13 @@ class Commit0EvalDriver:
     # -- one (arm, repo) cell -------------------------------------------
     def run_cell(self, arm: AblationArm, repo: str, *, limit: int = 1, rollouts: Optional[int] = None,
                  output_dir: Optional[str] = None) -> dict:
-        spec = registry.get(repo)
+        # BENCHMARK-AWARE registry resolution: for swerebench `repo` is an instance-id
+        # resolved from the pinned slice registry; default (commit0) is byte-identical.
+        if _active_benchmark() == "swerebench":
+            from . import swerebench_registry as _swe_registry
+            spec = _swe_registry.get(repo)
+        else:
+            spec = registry.get(repo)
         cfg_dict = build_arm_config_dict(self.base_config, arm, force_local=self.force_local, rollouts=rollouts)
         cell_out = Path(output_dir or (self.run_dir / "cells" / f"{arm.id}__{repo}"))
         cell_out.mkdir(parents=True, exist_ok=True)
@@ -308,8 +327,16 @@ class Commit0EvalDriver:
         """Mode C: run the generated-code orchestrator in-process on self.engine
         (journaled by the agent() calls inside autosolve).  Reuses v1's prep +
         scoring verbatim and NEVER raises (returns an _error dict on failure so the
-        matrix continues)."""
-        from .commit0_autogen import run_autogen_cell, write_cell_report
+        matrix continues).
+
+        BENCHMARK-AWARE dispatch: when ``APEX_OMEGA_BENCHMARK=='swerebench'`` route to
+        the self-contained ``swerebench_autogen.run_autogen_cell`` (instance-id keyed,
+        no commit0/datasets prep). Default (commit0) is byte-identical."""
+        if _active_benchmark() == "swerebench":
+            from .swerebench_autogen import run_autogen_cell
+            from .commit0_autogen import write_cell_report
+        else:
+            from .commit0_autogen import run_autogen_cell, write_cell_report
 
         report = run_autogen_cell(
             self.engine,
