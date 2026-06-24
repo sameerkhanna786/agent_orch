@@ -24,3 +24,6 @@ worktrees/
 # OS / editor
 .DS_Store
 *.swp
+
+# perturbed-commit0 local build artifacts (regenerable via scripts/perturb_commit0.py; nested git repos + machine-specific SHAs/bz2)
+apex_omega/eval/perturb/variants/

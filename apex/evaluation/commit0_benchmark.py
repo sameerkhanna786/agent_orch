@@ -2696,6 +2696,86 @@ def _load_commit0_task_overrides() -> dict[str, dict[str, Any]]:
 _COMMIT0_TASK_OVERRIDES: dict[str, dict[str, Any]] = _load_commit0_task_overrides()
 
 
+# --- perturbed-commit0 de-contaminated variants (ADDITIVE sidecar) -----------
+# A perturbed variant (``<repo>_perturbed``) is a separately-built, byte-distinct
+# benchmark target produced by ``apex_omega.eval.perturb`` (consistent symbol
+# alpha-rename + docstring neutralization, semantics-preserved via a gold-test
+# validation gate).  It is NOT in the HuggingFace dataset, so ``discover_tasks``
+# synthesizes its ``Commit0Task`` from this sidecar JSON, and ``_git_clone_with_retry``
+# sources it from the emitted LOCAL git mirror instead of GitHub.  When the sidecar
+# is absent, ALL of this is inert and vanilla commit0 is byte-identical.
+_COMMIT0_PERTURBED_TARGETS_SIDECAR = (
+    Path(__file__).resolve().parents[2]
+    / "apex_omega" / "eval" / "perturb" / "variants" / "perturbed_targets.json"
+)
+
+
+def _load_commit0_perturbed_targets() -> dict[str, dict[str, Any]]:
+    """Load the perturbed-variant sidecar (``{name: {repo, base_commit, ...}}``).
+
+    Missing/invalid file -> ``{}`` (vanilla commit0 unchanged).
+    """
+    path = _COMMIT0_PERTURBED_TARGETS_SIDECAR
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Perturbed-commit0 sidecar at %s unreadable (%s) — ignoring.", path, exc)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    targets = raw.get("targets")
+    return targets if isinstance(targets, dict) else {}
+
+
+_COMMIT0_PERTURBED_TARGETS: dict[str, dict[str, Any]] = _load_commit0_perturbed_targets()
+
+
+def _build_synthetic_perturbed_task(repo_name: str) -> Optional["Commit0Task"]:
+    """Synthesize a :class:`Commit0Task` for a perturbed variant from the sidecar.
+
+    Returns ``None`` if *repo_name* is not a known perturbed target.
+    """
+    entry = _COMMIT0_PERTURBED_TARGETS.get(repo_name)
+    if not entry:
+        return None
+    setup_python = str(entry.get("python_version", "3.12"))
+    task = Commit0Task(
+        instance_id=str(entry.get("repo") or repo_name),
+        repo=str(entry["repo"]),
+        original_repo="",
+        base_commit=str(entry["base_commit"]),
+        reference_commit=str(entry.get("reference_commit", "")),
+        python_version=setup_python,
+        specification="",
+        install_command=str(entry.get("install_command", "pip install -e .")),
+        packages=list(entry.get("packages") or []),
+        pip_packages=list(entry.get("pip_packages") or []),
+        pre_install=list(entry.get("pre_install") or []),
+        src_dir=str(entry.get("src_dir", "")),
+        test_cmd=str(entry.get("test_cmd", "pytest")),
+        test_dir=str(entry.get("test_dir", "")),
+    )
+    _apply_commit0_task_overrides(task)
+    return task
+
+
+def _perturbed_mirror_roots() -> list[str]:
+    """Local-mirror parent dirs declared by perturbed sidecar entries."""
+    roots: list[str] = []
+    for entry in _COMMIT0_PERTURBED_TARGETS.values():
+        root = entry.get("mirror_root")
+        if root and root not in roots:
+            roots.append(str(root))
+    return roots
+
+
+def _is_perturbed_task(task: "Commit0Task") -> bool:
+    return task.repo_name in _COMMIT0_PERTURBED_TARGETS
+
+
 def _is_repo_memory_disabled_via_env_safe() -> bool:
     """Defensive wrapper around the persistence helper.
 
@@ -6163,6 +6243,18 @@ class Commit0BenchmarkRunner:
                     break
 
         _append_matching_rows(_dataset_rows(self.dataset_revision))
+        # ADDITIVE: synthesize perturbed-variant tasks from the sidecar for any
+        # requested ``<repo>_perturbed`` not present in the dataset (it never is).
+        # When no perturbed repo is requested / no sidecar exists, this is inert.
+        if allowed_repos:
+            for repo_name in sorted(set(allowed_repos) - seen_repos):
+                synthetic = _build_synthetic_perturbed_task(repo_name)
+                if synthetic is None:
+                    continue
+                tasks.append(synthetic)
+                seen_repos.add(repo_name)
+                if limit is not None and len(tasks) >= limit:
+                    break
         if allowed_repos and (limit is None or len(tasks) < limit):
             missing_repos = set(allowed_repos) - seen_repos
             for fallback_revision in self.dataset_fallback_revisions:
@@ -13465,6 +13557,16 @@ print("APEX_COMMIT0_SOLVE_NETWORK_BOUNDARY_OK")
         timeout: int,
         max_attempts: int = 4,
     ) -> None:
+        # ADDITIVE: a perturbed-variant task has no GitHub repo — its source is the
+        # emitted LOCAL git mirror.  Go straight to the local-mirror fallback and
+        # skip GitHub entirely (a real clone would fail non-transiently and abort).
+        if _is_perturbed_task(task):
+            if self._try_local_clone_fallback(task, repo_dir, timeout=timeout):
+                return
+            raise RuntimeError(
+                f"perturbed variant {task.repo_name}: no local mirror found under "
+                f"{_perturbed_mirror_roots()} (run scripts/perturb_commit0.py to emit it)"
+            )
         # Transient HTTP proxy/CONNECT failures (Meta X2P agent flapping under
         # parallel benchmark load) account for the dominant failure mode in
         # historical full-suite runs: clones briefly fail with "Proxy CONNECT
@@ -13596,6 +13698,12 @@ print("APEX_COMMIT0_SOLVE_NETWORK_BOUNDARY_OK")
         configured_roots = list(
             getattr(self.config.benchmark, "commit0_local_repo_roots", []) or []
         )
+        # ADDITIVE: perturbed variants declare their emitted mirror parent dir in
+        # the sidecar so they resolve without any config change (vanilla unaffected
+        # — these roots only contain ``<repo>_perturbed`` mirrors).
+        for _proot in _perturbed_mirror_roots():
+            if _proot not in configured_roots:
+                configured_roots.append(_proot)
         for root in configured_roots:
             try:
                 root_path = Path(root).expanduser()

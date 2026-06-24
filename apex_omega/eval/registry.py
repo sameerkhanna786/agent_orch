@@ -56,6 +56,14 @@ TARGET_REPOS: tuple[RepoSpec, ...] = (
              notes="apt graphviz -> Docker required"),
     RepoSpec("geopandas", False, "3.10", notes="geo deps (shapely/pyproj)"),
     RepoSpec("cookiecutter", True, "3.10"),
+    # --- perturbed (de-contaminated) variants -------------------------------
+    # Built by ``apex_omega.eval.perturb`` (consistent symbol alpha-rename +
+    # docstring neutralization, semantics-preserved via a gold-test validation
+    # gate).  ``in_lite=False`` keeps them out of lite slices; they flow through
+    # the UNCHANGED gold-suite score path via the perturbed_targets sidecar.
+    # Vanilla specs above are untouched (byte-identical).
+    RepoSpec("voluptuous_perturbed", False, "3.10", notes="perturbed/de-contaminated variant of voluptuous"),
+    RepoSpec("networkx_perturbed", False, "3.12", notes="perturbed/de-contaminated variant of networkx"),
 )
 
 TARGET_NAMES: tuple[str, ...] = tuple(r.name for r in TARGET_REPOS)
