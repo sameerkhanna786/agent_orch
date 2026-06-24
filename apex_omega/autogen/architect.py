@@ -32,6 +32,8 @@ from .templates import (
     DECOMPOSE_EXEMPLAR,
     DEFAULT_ORCHESTRATION,
     RALPH_ORCHESTRATION,
+    TREE_SEARCH_EXEMPLAR,
+    TREE_SEARCH_ORCHESTRATION,
 )
 
 
@@ -117,6 +119,22 @@ only re-rank/downgrade/extend — never promote an unverified solve):
 
 A Candidate has .accepted (bool, EXECUTION evidence — read-only to you), .combined_score,
 .public_signal_score (pass_rate), .meta (incl .meta["failing_nodeids"]).
+"""
+
+# TREE-SEARCH v1 (LATS-style) — appended to the author prompt ONLY when APEX_OMEGA_TREE_SEARCH is on
+# AND the repo is medium/hard (gated in build_author_prompt). Off => not shown (the author never sees
+# it), so the default prompt is unchanged.
+TREE_SEARCH_API = """\
+TREE-SEARCH (LATS-style; an alternative escalation shape for harder repos). A host-side search tree:
+seed a root, then UCT-pick which banked PARTIAL to expand next; each expansion is one
+execution-scored attempt seeded by its parent's diff. Acceptance stays engine-owned (tree_search
+returns ctx.select over all banked candidates; it may abstain, never fakes a pass):
+  ctx.tree_search(budget_nodes=K, branch=2, c_uct=1.4, root_carry=?, vendor=?, model=?) -> Candidate|None
+                                              #   seed a root then UCT-expand until budget_nodes / governor /
+                                              #   budget stops it. budget_nodes is MANDATORY (pre-registered cost).
+  ctx.expand_node(node, vendor=?, model=?, residual_ids=?) -> Candidate|None  # expand ONE node (carry-grafted)
+  ctx.uct_select(nodes=?, c_uct=1.4) -> dict        # the next expandable node to expand (UCT; deterministic)
+  ctx.tree_state() -> {"nodes":[...], "best":<node>, "uct_pick":<node>}   # read-only introspection
 """
 
 INVARIANTS = """\
@@ -267,16 +285,27 @@ def build_author_prompt(repo_map: dict) -> str:
                          "improve on — e.g. decompose by module, pipeline stages, route hard work "
                          "to a stronger vendor)")
         primary_src = BEST_OF_N_ORCHESTRATION.strip()
+    # TREE-SEARCH v1: the API doc + exemplar are added to the prompt ONLY when the engine flag is on
+    # AND the repo is medium/hard (off / easy => unchanged default prompt, so the author never sees it).
+    _tree_on = os.environ.get("APEX_OMEGA_TREE_SEARCH", "0").strip().lower() not in (
+        "0", "false", "no", "off")
+    tree_api = ("\n" + TREE_SEARCH_API) if (_tree_on and difficulty in ("medium", "hard")) else ""
+    tree_exemplar = (
+        "\n\nTREE-SEARCH EXEMPLAR (LATS-style; an alternative for harder repos — seed a root then "
+        "UCT-expand the most promising banked partial within a pre-registered node budget):\n"
+        "```python\n" + TREE_SEARCH_EXEMPLAR.strip() + "\n```"
+    ) if (_tree_on and difficulty in ("medium", "hard")) else ""
     return (
         "Write a Python function `orchestrate(ctx)` tailored to THIS repository to "
         "solve its task with the fewest agents necessary, escalating until a verified "
-        "pass.\n\n" + API_REFERENCE + "\n" + INVARIANTS + _PIPELINE_VS_PARALLEL_RULE + framing_block +
+        "pass.\n\n" + API_REFERENCE + tree_api + "\n" + INVARIANTS + _PIPELINE_VS_PARALLEL_RULE + framing_block +
         "\nDISCOVERED REPOSITORY MAP:\n" + json.dumps(rmap, indent=2)[:6000] +
         "\n\n" + primary_label + ":\n```python\n" + primary_src +
         "\n```\n\nQUALITY-PATTERN EXEMPLAR (escalate -> synthesize -> adversarially verify; "
         "adapt the patterns to the repo's difficulty — they cost more agents, so reserve "
         "verification/synthesis for harder tasks):\n```python\n" + PATTERN_EXEMPLAR.strip() +
-        "\n```\n\nReturn ONLY a python code block defining orchestrate(ctx)."
+        "\n```" + tree_exemplar +
+        "\n\nReturn ONLY a python code block defining orchestrate(ctx)."
     )
 
 
@@ -330,6 +359,14 @@ def author_orchestration(
     if _orch_selector in ("converge", "rebuild"):
         lint = lint_source(DEFAULT_ORCHESTRATION)
         return _freeze(engine, DEFAULT_ORCHESTRATION, "converge", lint.ok, lint.violations)
+
+    # TREE-SEARCH v1 arm (A/B): freeze the LATS-style tree-search orchestration DIRECTLY (no author),
+    # so the budget-matched A/B is reproducible and resumes deterministically. The host-side engine
+    # (ctx.tree_search) is itself gated by APEX_OMEGA_TREE_SEARCH; with the engine off this frozen body
+    # calls ctx.tree_search -> None and abstains (so the arm is only meaningful with the flag on).
+    if _orch_selector == "tree-search":
+        lint = lint_source(TREE_SEARCH_ORCHESTRATION)
+        return _freeze(engine, TREE_SEARCH_ORCHESTRATION, "tree-search", lint.ok, lint.violations)
 
     # HYBRID arm: a Claude-Code-style host-side PHASE PLANNER runs AROUND the frozen converge body
     # (autosolve calls phase_planned_solve before run_orchestration). We freeze the converge default

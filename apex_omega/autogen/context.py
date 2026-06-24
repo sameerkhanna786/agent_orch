@@ -509,6 +509,16 @@ class OrchestrationContext:
         self._sarp_redecompose_seen: set = set()     # one re-decompose per residual sha (mirrors _plan_review_seen)
         self._sarp_stuck: bool = False               # terminal: diagnosis said genuinely-unsolvable
         self._sarp_last: Optional[dict] = None        # last reduce's {residual, gold_total, advanced}
+        # TREE-SEARCH v1 (LATS-style) host-side state — gated by APEX_OMEGA_TREE_SEARCH (default off =>
+        # these stay EMPTY/None and every tree method early-returns inert before touching them, so the
+        # converge/best-of-N path is byte-identical). The tree is a SOFT, host-side overlay over the
+        # banked candidates: each node is one execution-scored _attempt seeded by its parent's diff;
+        # value = gold_passed/max(1,gold_total) in [0,1]. NO green set (uncomputable — counts only).
+        # Tree stats NEVER set Candidate.accepted (Cardinal Contract); acceptance is select-owned.
+        self._tree: dict = {}            # id -> node dict
+        self._tree_root: Optional[str] = None
+        self._tree_children: dict = {}   # id -> list[child id]
+        self._tree_expansions: int = 0
         # for should_continue_waves() to pre-open an episode (defer the cut) at a sterile plateau
         # O1/NEW-I2: on a RESUME, rebuild the candidate frontier from the durable kind="candidate"
         # journal records BEFORE any new wave runs, so carry_best()/select/reduce never see a partial
@@ -3046,6 +3056,212 @@ class OrchestrationContext:
 
     def any_accepted(self, candidates: Sequence[Optional[Candidate]]) -> bool:
         return any(c is not None and c.accepted for c in candidates)
+
+    # ---- TREE-SEARCH v1 (LATS-style); gated by APEX_OMEGA_TREE_SEARCH (default off) ----
+    # A SOFT, host-side search overlay: each tree node is one execution-scored _attempt seeded by its
+    # parent's diff (carry-graft), scored by the SAME _scored() gate as every other attempt. UCT picks
+    # which banked partial to expand next. The tree is pure host-side bookkeeping over Candidates; it
+    # NEVER sets Candidate.accepted (Cardinal Contract — acceptance is ctx.select-owned, execution-
+    # grounded on the full gold suite). v1 uses ONLY the lossless integer gold_passed/gold_total counts
+    # (the failing_nodeids set is [:50]-truncated in the scoring path and there is no expected-id set in
+    # context, so green-set arithmetic is uncomputable — counts only, no union/coverage). Off =>
+    # byte-identical: every method early-returns inert before touching any _tree* state and these
+    # methods are not offered to the author / catalog.
+    _TREE_PATIENCE = 2   # plateau window for UCT exploit decay (no shared wave-patience const exists)
+
+    def _tree_on(self) -> bool:
+        return os.environ.get("APEX_OMEGA_TREE_SEARCH", "0").strip().lower() not in (
+            "0", "false", "no", "off")
+
+    @staticmethod
+    def _tree_node_value(node: dict) -> float:
+        gt = int((node or {}).get("gold_total", 0) or 0)
+        return int((node or {}).get("gold_passed", 0) or 0) / max(1, gt)
+
+    def _tree_register(self, cand: Optional[Candidate], *, parent: Optional[str]) -> Optional[dict]:
+        """Build + register a TreeNode from a banked Candidate (or None on infra failure). Sets the
+        parent pointer, updates the parent's visit count, and backprops lineage `since_improve`
+        (reset to 0 on a child that improves the lineage best gold_passed, else +1). NEVER sets
+        Candidate.accepted. Returns the node dict (or None)."""
+        if cand is None:
+            return None
+        m = getattr(cand, "meta", {}) or {}
+        nid = cand.candidate_id
+        gp = int(m.get("gold_passed", 0) or 0)
+        gt = int(m.get("gold_total", 0) or 0)
+        # lineage best so far (the parent chain's max gold_passed); a child that beats it resets the
+        # plateau counter, else it inherits parent.since_improve + 1.
+        parent_node = self._tree.get(parent) if parent is not None else None
+        lineage_best = -1
+        p = parent_node
+        while p is not None:
+            lineage_best = max(lineage_best, int(p.get("gold_passed", 0) or 0))
+            p = self._tree.get(p.get("parent")) if p.get("parent") is not None else None
+        if parent_node is None or gp > lineage_best:
+            since = 0
+        else:
+            since = int(parent_node.get("since_improve", 0) or 0) + 1
+        node = {"id": nid, "parent": parent, "diff": getattr(cand, "diff", "") or "",
+                "gold_passed": gp, "gold_total": gt, "visits": 0, "value_sum": 0.0,
+                "since_improve": since}
+        self._tree[nid] = node
+        self._tree_children.setdefault(nid, [])
+        if parent is not None:
+            self._tree_children.setdefault(parent, []).append(nid)
+            if parent_node is not None:
+                parent_node["visits"] = int(parent_node.get("visits", 0) or 0) + 1
+                parent_node["value_sum"] = float(parent_node.get("value_sum", 0.0) or 0.0) + self._tree_node_value(node)
+        return node
+
+    def uct_select(self, nodes: Optional[Sequence[dict]] = None, c_uct: float = 1.4) -> dict:
+        """Pick the next EXPANDABLE node to expand by UCT. Expandable = visits < branch (tracked on
+        the node as ``_branch``; root is always expandable) and not terminal-accepted (tree nodes are
+        never accepted, so this is just the visits gate + root). Score:
+            exploit * (0.5 ** plateaus) + c_uct * sqrt(ln(max(1,total_expansions)) / (1 + visits))
+        where exploit = gold_passed/max(1,gold_total), plateaus = since_improve // patience. Deterministic
+        tiebreak by node content sha / id (NO time/random — lint forbids them and replay requires it).
+        Returns {} when off / no expandable node."""
+        if not self._tree_on():
+            return {}
+        import math
+        pool = list(nodes) if nodes is not None else list(self._tree.values())
+        expandable = []
+        for nd in pool:
+            if nd is None:
+                continue
+            branch = int(nd.get("_branch", 2) or 2)
+            is_root = (nd.get("id") == self._tree_root)
+            if is_root or int(nd.get("visits", 0) or 0) < branch:
+                expandable.append(nd)
+        if not expandable:
+            return {}
+        total = max(1, self._tree_expansions)
+        ln_total = math.log(total)
+
+        def _score(nd: dict) -> float:
+            exploit = self._tree_node_value(nd)
+            plateaus = int(nd.get("since_improve", 0) or 0) // max(1, self._TREE_PATIENCE)
+            explore = c_uct * math.sqrt(ln_total / (1 + int(nd.get("visits", 0) or 0)))
+            return exploit * (0.5 ** plateaus) + explore
+
+        # argmax with a deterministic content-sha/id tiebreak (no random/time).
+        best = None
+        best_key = None
+        for nd in expandable:
+            tie = str(nd.get("id") or "")
+            key = (_score(nd), tie)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = nd
+        return best or {}
+
+    def expand_node(self, node: dict, *, vendor: Optional[str] = None,
+                    model: Optional[str] = None,
+                    residual_ids: Optional[Sequence[str]] = None) -> Optional[Candidate]:
+        """Expand ONE tree node: a thin wrapper over ``_attempt(pre_apply_diff=node["diff"], ...)`` with
+        a distinct 't' prefix/namespace and a residual-repair brief over the node's still-failing ids
+        (the existing residual brief builder; the [:50]-capped failing_nodeids is fine as a repair HINT).
+        Registers the returned Candidate as a child TreeNode (parent pointer, visits/value, since_improve
+        backprop) and folds it into the SPFG+ frontier ONLY when frontier-improving (gold_passed > prior
+        global best) so exploratory non-improving expansions never advance the global sterile/nonresult
+        streaks (GROUND-TRUTH #3). NEVER sets Candidate.accepted. Inert (None) when off."""
+        if not self._tree_on() or not node:
+            return None
+        aid = self._next_attempt_id()
+        carry = node.get("diff", "") or ""
+        # residual ids: caller-supplied, else the node's own (banked) failing ids — a [:50]-capped
+        # repair HINT only (counts, not the set, drive scoring).
+        if residual_ids is None:
+            cand = next((c for c in self.all_candidates()
+                         if getattr(c, "candidate_id", None) == node.get("id")), None)
+            residual_ids = list(((getattr(cand, "meta", {}) or {}).get("failing_nodeids")) or []) if cand else []
+        ids = [str(i) for i in (residual_ids or [])]
+        # build the residual-repair brief over the node's residual ids (reuse the existing builder shape).
+        base = self._prompt_builder(self, aid, "tree_expand")
+        ids_block = "\n".join(ids[:40]) if ids else "(see the failing subset)"
+        prompt = (
+            base
+            + "\n\n--- TREE-SEARCH EXPANSION (live partial tree) ---\n"
+            + "A partial implementation is ALREADY IN THIS WORKSPACE — keep what works. "
+            + "These gold tests still FAIL; make them pass without breaking the rest:\n"
+            + ids_block + "\n"
+            + "Make the smallest correct change to turn these tests green. Do NOT edit tests.\n")
+        child = self._attempt(
+            aid=aid, prefix="t", node_prefix="tree", prompt=prompt, strategy="tree_expand",
+            vendor=vendor, model=model, pre_apply_diff=carry,
+            scoped_extra={"tree_parent": str(node.get("id") or ""), "residual_ids": ids[:40]},
+            meta_extra={"tree_expand": True})
+        prior_best = int(self._best_gold_passed)
+        self._tree_register(child, parent=node.get("id"))
+        # FRONTIER-IMPROVING ONLY: only a child that raises the frontier best gold_passed folds into the
+        # global SPFG+ accounting; a non-improving exploratory expansion is accounted against the local
+        # budget_nodes only (it is still banked by _attempt, so ctx.select sees it). This keeps the
+        # governor's global sterile/nonresult streaks honest under exploratory branching (GROUND-TRUTH #3).
+        if child is not None:
+            gp = int((getattr(child, "meta", {}) or {}).get("gold_passed", 0) or 0)
+            if gp > prior_best:
+                self._observe([child])
+        return child
+
+    def tree_search(self, *, budget_nodes: int, branch: int = 2, c_uct: float = 1.4,
+                    root_carry: str = "", vendor: Optional[str] = None,
+                    model: Optional[str] = None) -> Optional[Candidate]:
+        """LATS-style tree search: seed a root expansion (an _attempt seeded by root_carry), then loop
+        UCT-select -> expand until the local node budget is spent / the governor halts / the budget can
+        no longer start work / a child is execution-accepted. Returns ctx.select over all banked
+        candidates (may abstain — never fakes a pass; acceptance is select-owned). ``budget_nodes`` is
+        MANDATORY (no default): cost must be pre-registered for a budget-matched A/B. Inert (None) when
+        off — the converge/best-of-N path is byte-identical."""
+        if not self._tree_on():
+            return None
+        budget_nodes = int(budget_nodes)
+        branch = max(1, int(branch))
+        # (0) SEED THE ROOT: one expansion (carry-grafted) registered as the root node.
+        if self._tree_root is None:
+            aid = self._next_attempt_id()
+            seed = self._attempt(
+                aid=aid, prefix="t", node_prefix="tree", prompt=self._prompt_builder(self, aid, "tree_root"),
+                strategy="tree_root", vendor=vendor, model=model, pre_apply_diff=(root_carry or ""),
+                scoped_extra={"tree_root": True}, meta_extra={"tree_expand": True})
+            prior_best = int(self._best_gold_passed)
+            root_node = self._tree_register(seed, parent=None)
+            if root_node is not None:
+                root_node["_branch"] = branch
+                self._tree_root = root_node["id"]
+                # the root seed is a first real measurement -> always fold it into the frontier.
+                if seed is not None:
+                    self._observe([seed])
+            self._tree_expansions += 1
+            if seed is not None and getattr(seed, "accepted", False):
+                return self.select(self._all_candidates)
+        # (1) UCT EXPANSION LOOP, bounded by budget_nodes / governor / budget.
+        while (self.should_continue_waves() and self._tree_expansions < budget_nodes
+               and self.budget.can_start()):
+            pick = self.uct_select(c_uct=c_uct)
+            if not pick:
+                break
+            pick.setdefault("_branch", branch)
+            child = self.expand_node(pick, vendor=vendor, model=model)
+            self._tree_expansions += 1
+            if child is not None and getattr(child, "accepted", False):
+                break
+        return self.select(self._all_candidates)
+
+    def tree_state(self) -> dict:
+        """READ-ONLY introspection of the host-side tree: {"nodes":[...], "best":<node>, "uct_pick":
+        <node>}. Empty ({"nodes": [], "best": None, "uct_pick": None}) when off / no tree yet."""
+        if not self._tree_on() or not self._tree:
+            return {"nodes": [], "best": None, "uct_pick": None}
+        nodes = list(self._tree.values())
+        best = None
+        best_key = (-1, -1.0)
+        for nd in nodes:
+            key = (int(nd.get("gold_passed", 0) or 0), self._tree_node_value(nd))
+            if key > best_key:
+                best_key = key
+                best = nd
+        pick = self.uct_select(c_uct=1.4)
+        return {"nodes": nodes, "best": best, "uct_pick": (pick or None)}
 
     # ---- a convenience escalation schedule (the generated code may ignore it) ----
     def plan_waves(self, schedule: Optional[Sequence[int]] = None, *,

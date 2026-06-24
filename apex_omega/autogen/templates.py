@@ -249,6 +249,33 @@ def orchestrate(ctx):
 '''
 
 
+# TREE-SEARCH v1 (LATS-style) — gated by APEX_OMEGA_TREE_SEARCH (default OFF). Frozen, pinned via
+# APEX_OMEGA_ORCHESTRATION=tree-search and registered as ctx.workflow("tree-search"). The host-side
+# tree (ctx.tree_search) seeds a root, then UCT-selects which banked partial to expand next (each
+# expansion is one execution-scored _attempt seeded by its parent's diff), bounded by budget_nodes /
+# the governor / budget. Acceptance stays engine-owned: ctx.tree_search returns ctx.select over all
+# banked candidates (may abstain — never fakes a pass). The frozen body passes the frozen-template
+# lint (no getattr / os.environ / imports / binding .accepted).
+TREE_SEARCH_ORCHESTRATION = '''
+def orchestrate(ctx):
+    ctx.phase("tree-search")
+    return ctx.tree_search(budget_nodes=1000, branch=2, c_uct=1.4)
+'''
+
+
+# The TREE-SEARCH exemplar handed to the architect (ONLY when APEX_OMEGA_TREE_SEARCH is on AND the
+# repo is medium/hard) so an enabled author can adopt the LATS-style search shape: seed a root, then
+# UCT-expand the most promising banked partial until the node budget / governor / budget stops it.
+TREE_SEARCH_EXEMPLAR = '''
+def orchestrate(ctx):
+    ctx.phase("tree-search")
+    # LATS-style: seed a root then UCT-expand the most promising banked partial. budget_nodes caps the
+    # number of expansions (MANDATORY — pre-registered cost). Acceptance is engine-owned: tree_search
+    # returns ctx.select over all banked candidates (may abstain, never fakes a pass).
+    return ctx.tree_search(budget_nodes=8, branch=2, c_uct=1.4, root_carry=ctx.carry_best())
+'''
+
+
 # A second exemplar: decompose a large modular repo and pipeline per-module, then
 # a global verified select. Shows the architect the decomposition pattern.
 DECOMPOSE_EXEMPLAR = '''

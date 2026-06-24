@@ -213,6 +213,17 @@ ARMS = [
                        "APEX_OMEGA_GOAL_GATE": "0",
                        "APEX_OMEGA_DIAG": "1", "APEX_OMEGA_PLAN_REVIEW": "1", "APEX_OMEGA_PHASE0": "1",
                        "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
+    # ===== TREE-SEARCH v1 (LATS-style) A/B vs hybrid-diag. ONLY variable = the orchestration shape:
+    # a host-side UCT tree that re-seeds fresh-scoped agents from the best partial diff and BACKTRACKS
+    # off a derailed branch (targets babel/networkx run-to-run VARIANCE). budget_nodes=1000 in the
+    # frozen body = governor-terminated, same unbounded envelope as hybrid-diag (budget-matched at the
+    # operating point; report agents/cell for compute parity). Cardinal Contract intact (ctx.select).
+    #   LADDER_ARMS=hybrid-diag,tree-search LADDER_REPOS=babel,networkx,voluptuous LADDER_SEEDS=5 \
+    #   APEX_CODEX_FAST=0 python scripts/run_ladder.py
+    ("tree-search",   ["--arms", "autogen_orchestrator", "--autogen-scout-agents", "0",
+                       "--autogen-max-agents", _OMEGA_MAX],
+                      {"APEX_OMEGA_ORCHESTRATION": "tree-search", "APEX_OMEGA_TREE_SEARCH": "1",
+                       "APEX_OMEGA_REPAIR_ITERS": "2", "APEX_OMEGA_REPAIR_EXCERPTS": "1"}),
     # ===== SARP A/B (last-mile fix) — "the new version" vs the A/B winner (hybrid-diag). The ONLY
     # variable is APEX_OMEGA_SARP: on a sterile near-solve plateau it diagnoses the residual gap's
     # direction (read-only scouts) + re-aims with failure excerpts before the governor cuts. Tests

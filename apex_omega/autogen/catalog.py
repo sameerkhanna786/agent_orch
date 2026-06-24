@@ -18,6 +18,7 @@ from .templates import (
     DECOMPOSE_EXEMPLAR,
     DEFAULT_ORCHESTRATION,
     RALPH_ORCHESTRATION,
+    TREE_SEARCH_ORCHESTRATION,
 )
 
 # Built-in, name-addressable workflows. Each value is a frozen ``orchestrate(ctx)`` source.
@@ -32,6 +33,10 @@ BUILTIN_WORKFLOWS: dict[str, str] = {
     "decompose": DECOMPOSE_EXEMPLAR,
     "ralph": RALPH_ORCHESTRATION,
     "audit": AUDIT_ORCHESTRATION,
+    # tree-search v1 (LATS-style); the host-side ctx.tree_search engine is gated by
+    # APEX_OMEGA_TREE_SEARCH (default off => tree_search early-returns None and this resolves to a
+    # frozen body that simply abstains, so converge/best-of-N stays byte-identical).
+    "tree-search": TREE_SEARCH_ORCHESTRATION,
 }
 
 
